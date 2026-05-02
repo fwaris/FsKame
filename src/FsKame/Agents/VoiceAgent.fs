@@ -31,7 +31,7 @@ module VoiceAgent =
                 ) }
 
     let private instructions =
-        "You are FsKame, a low-latency voice question-answering assistant. Keep answers conversational and brief: usually one to three short spoken sentences. Avoid preambles, long caveats, and exhaustive lists unless the user asks. When backend oracle guidance is supplied, use it as the best available answer. If PDFs are mentioned, cite them naturally."
+        "You are FsKame, a low-latency voice question-answering assistant in strict document mode. Answer only from selected PDFs and backend oracle guidance. Do not use general knowledge. If the selected PDFs do not contain the answer, say that briefly. Keep answers conversational and brief: usually one to three short spoken sentences."
 
     let private updateSession (session: Session) =
         { session with
@@ -64,20 +64,20 @@ module VoiceAgent =
         |> Connection.sendClientEvent conn
 
     let private fallbackInstructions (snapshot: TranscriptSnapshot) =
-        $"{instructions}\n\nThe user just said:\n{snapshot.text}\n\nAnswer now."
+        $"{instructions}\n\nThe user just said:\n{snapshot.text}\n\nNo backend document guidance is available. Say briefly that you cannot answer from the selected documents right now."
 
     let private oracleInstructions (snapshot: TranscriptSnapshot) (candidate: OracleCandidate) =
         let contextNote =
             if List.isEmpty candidate.context then
-                "No PDF source matched this question."
+                "No selected PDF chunk matched this question. Do not add outside knowledge."
             else
                 candidate.context
                 |> List.map (fun c -> c.source.DisplayName)
                 |> List.distinct
                 |> String.concat "; "
-                |> sprintf "Relevant external source(s): %s"
+                |> sprintf "Relevant selected PDF source(s): %s"
 
-        $"{instructions}\n\nThe user just said:\n{snapshot.text}\n\nBackend oracle guidance:\n{candidate.answer}\n\n{contextNote}\n\nSay the guided answer naturally and avoid exposing implementation details."
+        $"{instructions}\n\nThe user just said:\n{snapshot.text}\n\nBackend oracle guidance:\n{candidate.answer}\n\n{contextNote}\n\nSay the guided answer naturally. Do not add facts that are not in the selected PDFs."
 
     let private publishTranscript st itemId text isFinal =
         let revision = st.revision + 1

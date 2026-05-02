@@ -30,14 +30,14 @@ module AppAgent =
                 let msg =
                     if List.isEmpty chunks then
                         let sourceCount = inventory |> List.filter _.enabled |> List.length
-                        $"No external source match for: {snapshot.text}; {sourceCount} source(s) available."
+                        $"No selected PDF match for: {snapshot.text}; {sourceCount} PDF source(s) available."
                     else
                         $"Matched {chunks.Length} source chunk(s): {sourceNames chunks}"
 
                 st.Send(Log_Append msg)
             | Ag_ResponseReady(_, Some candidate) ->
                 st.Send(Log_Append $"Oracle: {FsKame.Text.truncate 500 candidate.answer}")
-            | Ag_ResponseReady(_, None) -> st.Send(Log_Append "No oracle guidance; using realtime fallback.")
+            | Ag_ResponseReady(_, None) -> st.Send(Log_Append "No oracle guidance; document-only fallback.")
             | Ag_FlowError err -> st.Send(Log_Append err.ErrorText)
             | Ag_FlowDone e -> st.Send(Log_Append $"Flow done abnormal={e.abnormal}")
             | _ -> ()

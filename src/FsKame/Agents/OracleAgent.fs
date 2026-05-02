@@ -22,11 +22,11 @@ module OracleAgent =
 
         [ ChatMessage(
               ChatRole.System,
-              "You are FsKame's backend oracle. Answer the user's question briefly, usually in one to three short sentences. Do not include preambles, long caveats, implementation details, or exhaustive lists unless the user asks for them. Prefer the supplied PDF context when it is relevant. If the user asks which documents or sources are available, answer from the supplied PDF inventory. If the selected PDF context does not answer the question, say so briefly and answer from general knowledge only when appropriate."
+              "You are FsKame's backend oracle in strict document mode. Answer only from the selected PDF inventory and matched PDF context. Do not use general knowledge. If the answer is not present in the selected PDFs, say briefly that the selected documents do not contain that answer. If no selected PDFs are available, say no documents are currently selected. Keep answers conversational and brief, usually one to three short sentences."
           )
           ChatMessage(
               ChatRole.User,
-              $"User transcript:\n{snapshot.text}\n\nSelected source inventory:\n{inventory}\n\nMatched external context:\n{sourceContext}\n\nReturn the answer the realtime voice agent should say now."
+              $"User transcript:\n{snapshot.text}\n\nSelected PDF inventory:\n{inventory}\n\nMatched PDF context:\n{sourceContext}\n\nReturn only what the realtime voice agent should say now."
           ) ]
 
     let private runOracle

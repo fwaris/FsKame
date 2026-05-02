@@ -125,7 +125,7 @@ module KnowledgeSources =
 
     let renderContext (chunks: SourceChunk list) =
         if List.isEmpty chunks then
-            "No external source context was available."
+            "No selected PDF context was available."
         else
             chunks
             |> List.mapi (fun index (chunk: SourceChunk) ->

@@ -2,7 +2,7 @@
 
 FsKame is an F#/.NET MAUI realtime voice question-answering app for selected PDF sources.
 
-It builds a mobile shell around a small collection of realtime agents using RTOpenAI/RTFlow. PDFs are copied into app-owned storage, processed, persisted as a checkable source list, and only selected ready PDFs are used for answers.
+It builds a mobile shell around a small collection of realtime agents using RTOpenAI/RTFlow. PDFs are copied into app-owned storage, processed, persisted as a checkable source list, and only selected ready PDFs are used for answers. FsKame runs in strict document mode: it answers from the selected PDFs and declines when the selected documents do not contain the answer.
 
 ## Features
 
@@ -13,6 +13,7 @@ It builds a mobile shell around a small collection of realtime agents using RTOp
 - PDF text extraction and chunking for low-latency source retrieval.
 - Embedded PDF image detection notes are added to the source index so image-heavy pages are represented.
 - Voice answers can list which selected PDFs are currently available.
+- Strict document-only answering; no general-knowledge fallback.
 
 ## Build
 
