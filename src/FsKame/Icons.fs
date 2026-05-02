@@ -1,0 +1,16 @@
+namespace FsKame
+
+module Icons =
+    let mic = "\ue029"
+    let power = "\ue8ac"
+    let play = "\ue037"
+    let stop = "\ue047"
+    let settings = "\ue8b8"
+    let visible = "\ue8f4"
+    let visibilityOff = "\ue8f5"
+    let back = "\ue5c4"
+    let uploadFile = "\uf09b"
+    let save = "\ue161"
+    let clear = "\ue872"
+    let signalDisconnected = "\uf239"
+    let signalConnected = "\uf0eb"

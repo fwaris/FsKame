@@ -1,0 +1,22 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Fabulous.MauiControls" Version="9.0.0-pre9" />
+    <PackageVersion Include="FSharp.Control.AsyncSeq" Version="4.15.0" />
+    <PackageVersion Include="FSharp.Core" Version="11.0.100" />
+    <PackageVersion Include="FSharp.DI" Version="1.0.0" />
+    <PackageVersion Include="FSharp.Maui.WinUICompat" Version="1.1.0" />
+    <PackageVersion Include="FSharp.SystemTextJson" Version="1.4.36" />
+    <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.5.0" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.7" />
+    <PackageVersion Include="Microsoft.Maui.Controls" Version="10.0.51" />
+    <PackageVersion Include="Microsoft.Maui.Controls.Compatibility" Version="10.0.51" />
+    <PackageVersion Include="PdfPig" Version="0.1.14" />
+    <PackageVersion Include="RTOpenAI.Api" Version="0.9.3.3" />
+    <PackageVersion Include="RTOpenAI.Events" Version="0.9.3.3" />
+    <PackageVersion Include="RTFlow" Version="0.9.3.3" />
+  </ItemGroup>
+</Project>
