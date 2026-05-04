@@ -94,3 +94,10 @@ module Settings =
             | None -> C.DEFAULT_ORACLE_MODEL
 
         Preferences.Default.Set(C.SETTINGS_ORACLE_MODEL, value)
+
+    let retrievalMode () =
+        Preferences.Default.Get(C.SETTINGS_RETRIEVAL_MODE, RetrievalModes.toStorageValue FsColbertWithFallback)
+        |> RetrievalModes.ofStorageValue
+
+    let setRetrievalMode mode =
+        Preferences.Default.Set(C.SETTINGS_RETRIEVAL_MODE, RetrievalModes.toStorageValue mode)

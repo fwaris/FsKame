@@ -21,6 +21,43 @@ type PdfProcessResult =
       chunkCount: int
       error: string option }
 
+type PdfDeleteResult =
+    { id: string
+      displayName: string
+      removedFile: bool
+      removedIndexCount: int
+      indexErrors: string list }
+
+type RetrievalMode =
+    | InternalDocumentIndex
+    | FsColbertWithFallback
+
+module RetrievalModes =
+    let labels = [ "Internal document index"; "FsColbert index with fallback" ]
+
+    let toStorageValue mode =
+        match mode with
+        | InternalDocumentIndex -> "internal"
+        | FsColbertWithFallback -> "fscolbert-with-fallback"
+
+    let ofStorageValue value =
+        match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
+        | "internal"
+        | "internal-document-index" -> InternalDocumentIndex
+        | _ -> FsColbertWithFallback
+
+    let toIndex mode =
+        match mode with
+        | InternalDocumentIndex -> 0
+        | FsColbertWithFallback -> 1
+
+    let ofIndex index =
+        match index with
+        | 0 -> InternalDocumentIndex
+        | _ -> FsColbertWithFallback
+
+    let displayName mode = labels |> List.item (toIndex mode)
+
 module PdfDocuments =
     let isReady doc =
         match doc.status with

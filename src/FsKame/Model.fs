@@ -16,6 +16,7 @@ type ConnectionBundle =
 type StartParams =
     { apiKey: string
       oracleModel: string
+      retrievalMode: RetrievalMode
       sources: KnowledgeSource list
       mailbox: Channel<Msg> }
 
@@ -26,6 +27,7 @@ and Model =
       sessionState: RTOpenAI.WebRTC.State
       openAiKey: string
       oracleModel: string
+      retrievalMode: RetrievalMode
       pdfDocuments: PdfDocumentSource list
       log: string list
       hideSecrets: bool
@@ -34,6 +36,7 @@ and Model =
 and Msg =
     | OpenAiKeyChanged of string
     | OracleModelChanged of string
+    | RetrievalModeChanged of RetrievalMode
     | Settings_Show
     | Settings_Close
     | ToggleSecretVisibility
@@ -42,6 +45,8 @@ and Msg =
     | PdfProcessingCompleted of Result<PdfProcessResult list, exn>
     | PdfSelectionChanged of string * bool
     | RetryPdfProcessing of string
+    | DeletePdf of string
+    | DeletePdfCompleted of Result<PdfDeleteResult, exn>
     | ApplySources
     | StartStop
     | StartCompleted of Result<ConnectionBundle, exn>

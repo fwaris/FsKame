@@ -1,6 +1,7 @@
 namespace FsKame.WorkFlow
 
 open System
+open FsKame
 open RTFlow
 
 type SourceKind = | Pdf
@@ -18,7 +19,7 @@ type SourceChunk =
     { source: KnowledgeSource
       index: int
       text: string
-      score: int }
+      score: float32 }
 
 type TranscriptSnapshot =
     { turnId: string
@@ -44,7 +45,7 @@ type FlowMsg =
 type AgentMsg =
     | Ag_FlowError of WErrorType
     | Ag_FlowDone of {| abnormal: bool |}
-    | Ag_SourcesUpdated of KnowledgeSource list
+    | Ag_SourcesUpdated of RetrievalMode * KnowledgeSource list
     | Ag_TranscriptUpdated of TranscriptSnapshot
     | Ag_ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
     | Ag_ResponseReady of TranscriptSnapshot * OracleCandidate option

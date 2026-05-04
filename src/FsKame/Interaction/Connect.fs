@@ -27,7 +27,13 @@ module Connect =
                                 Disposables = stateSubscription :: conn.Disposables }
 
                         let flow =
-                            StateMachine.create parms.mailbox apiKey parms.oracleModel conn parms.sources
+                            StateMachine.create
+                                parms.mailbox
+                                apiKey
+                                parms.oracleModel
+                                parms.retrievalMode
+                                conn
+                                parms.sources
 
                         flow.PostToFlow Fl_Start
 

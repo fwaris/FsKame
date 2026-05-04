@@ -42,10 +42,13 @@ module PdfSourcesView =
             .strokeThickness(1.)
             .strokeShape (RoundRectangle(CornerRadius(8.)))
 
-    let private row (doc: PdfDocumentSource) =
+    let private row isBusy (doc: PdfDocumentSource) =
         Border(
             (Grid(
-                [ Dimension.Absolute 42.; Dimension.Star; Dimension.Absolute 48. ],
+                [ Dimension.Absolute 42.
+                  Dimension.Star
+                  Dimension.Absolute 48.
+                  Dimension.Absolute 48. ],
                 [ Dimension.Absolute 28.; Dimension.Absolute 28. ]
             ) {
                 CheckBox(doc.selected, fun selected -> PdfSelectionChanged(doc.id, selected))
@@ -71,8 +74,14 @@ module PdfSourcesView =
 
                 if doc.status = Failed then
                     (ViewControls.compactIconButton Icons.play (RetryPdfProcessing doc.id))
+                        .isEnabled(not isBusy)
                         .gridColumn(2)
                         .gridRowSpan (2)
+
+                (ViewControls.compactDangerIconButton Icons.delete (DeletePdf doc.id))
+                    .isEnabled(not isBusy)
+                    .gridColumn(3)
+                    .gridRowSpan (2)
             })
                 .padding (8.)
         )
@@ -89,7 +98,7 @@ module PdfSourcesView =
                 if List.isEmpty model.pdfDocuments then
                     emptyView.gridRow (1)
                 else
-                    (CollectionView (model.pdfDocuments) row).gridRow (1)
+                    (CollectionView (model.pdfDocuments) (row model.isBusy)).gridRow (1)
 
                 (addPdfButton model).gridRow (1)
             })

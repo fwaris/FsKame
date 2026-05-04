@@ -85,3 +85,12 @@ module PdfLibrary =
 
             return results |> Array.toList
         }
+
+    let deleteStoredPdf (doc: PdfDocumentSource) =
+        async {
+            if String.IsNullOrWhiteSpace doc.storedPath || not (File.Exists doc.storedPath) then
+                return false
+            else
+                File.Delete doc.storedPath
+                return true
+        }

@@ -26,6 +26,15 @@ module ViewControls =
             .height(42.)
             .padding (0.)
 
+    let compactDangerIconButton icon (msg: Msg) =
+        Button(icon, msg)
+            .font(size = 24., fontFamily = C.FONT_SYMBOLS)
+            .background(Colors.Transparent)
+            .textColor(Colors.Firebrick)
+            .width(42.)
+            .height(42.)
+            .padding (0.)
+
     let formLabel text row =
         Label(text)
             .font(size = 13., attributes = FontAttributes.Bold)

@@ -17,11 +17,12 @@ module Update =
     let private saveSettings model =
         Settings.setOpenAiKey model.openAiKey
         Settings.setOracleModel model.oracleModel
+        Settings.setRetrievalMode model.retrievalMode
         Settings.setPdfLibrary model.pdfDocuments
 
     let private postSources model =
         match model.bundle with
-        | Some bundle -> bundle.flow.PostToAgent(Ag_SourcesUpdated(sources model))
+        | Some bundle -> bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model))
         | None -> ()
 
     let private pickAndCopyPdfs existing =
@@ -45,6 +46,23 @@ module Update =
             try
                 let! results = PdfLibrary.processPdfs docs
                 return Ok results
+            with ex ->
+                return Error ex
+        }
+
+    let private deletePdfAndIndexes (doc: PdfDocumentSource) =
+        async {
+            try
+                let! removedFile = PdfLibrary.deleteStoredPdf doc
+                let! removedIndexCount, indexErrors = KnowledgeSources.clearPersistedIndexes ()
+
+                return
+                    Ok
+                        { id = doc.id
+                          displayName = doc.displayName
+                          removedFile = removedFile
+                          removedIndexCount = removedIndexCount
+                          indexErrors = indexErrors }
             with ex ->
                 return Error ex
         }
@@ -82,6 +100,7 @@ module Update =
     let private startParams model =
         { apiKey = model.openAiKey
           oracleModel = model.oracleModel
+          retrievalMode = model.retrievalMode
           sources = sources model
           mailbox = model.mailbox }
 
@@ -92,6 +111,7 @@ module Update =
           sessionState = RTOpenAI.WebRTC.State.Disconnected
           openAiKey = Settings.openAiKey ()
           oracleModel = Settings.oracleModel ()
+          retrievalMode = Settings.retrievalMode ()
           pdfDocuments = Settings.pdfLibrary ()
           log = [ "FsKame ready. Add PDFs, then connect." ]
           hideSecrets = true
@@ -102,6 +122,7 @@ module Update =
         match msg with
         | OpenAiKeyChanged value -> { model with openAiKey = value }, Cmd.none
         | OracleModelChanged value -> { model with oracleModel = value }, Cmd.none
+        | RetrievalModeChanged mode -> { model with retrievalMode = mode }, Cmd.none
         | Settings_Show -> { model with currentPage = Settings }, Cmd.none
         | Settings_Close ->
             saveSettings model
@@ -198,6 +219,45 @@ module Update =
 
                 Settings.setPdfLibrary model.pdfDocuments
                 model, Cmd.OfAsync.either processPdfs retry PdfProcessingCompleted EventError
+        | DeletePdf id ->
+            match model.pdfDocuments |> List.tryFind (fun doc -> doc.id = id) with
+            | None -> model, Cmd.none
+            | Some doc ->
+                { model with isBusy = true }, Cmd.OfAsync.either deletePdfAndIndexes doc DeletePdfCompleted EventError
+        | DeletePdfCompleted(Ok result) ->
+            let pdfDocuments =
+                model.pdfDocuments |> List.filter (fun doc -> doc.id <> result.id)
+
+            let fileMsg =
+                if result.removedFile then
+                    $"Deleted PDF: {result.displayName}."
+                else
+                    $"Removed PDF library entry: {result.displayName}."
+
+            let indexMsg =
+                if result.removedIndexCount = 0 then
+                    "No persisted FsColbert indexes needed removal."
+                else
+                    $"Removed {result.removedIndexCount} persisted FsColbert index file(s)."
+
+            let log =
+                [ yield fileMsg; yield indexMsg; yield! result.indexErrors ] @ model.log
+                |> List.truncate C.MAX_LOG
+
+            let model =
+                { model with
+                    pdfDocuments = pdfDocuments
+                    isBusy = false
+                    log = log }
+
+            Settings.setPdfLibrary model.pdfDocuments
+            postSources model
+            model, Cmd.none
+        | DeletePdfCompleted(Error ex) ->
+            { model with
+                isBusy = false
+                log = $"PDF delete failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
+            Cmd.none
         | ApplySources ->
             saveSettings model
             postSources model

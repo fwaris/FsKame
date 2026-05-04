@@ -11,6 +11,7 @@ module StateMachine =
           bus: WBus<FlowMsg, AgentMsg>
           apiKey: string
           oracleModel: string
+          retrievalMode: RetrievalMode
           conn: RTOpenAI.Api.Connection
           sources: KnowledgeSource list }
 
@@ -39,7 +40,7 @@ module StateMachine =
             | W_Err err -> return F(s_terminate ss, [ Ag_FlowError err; Ag_FlowDone {| abnormal = true |} ])
             | W_Msg Fl_Start ->
                 do! startAgents ss
-                return F(s_run ss, [ Ag_SourcesUpdated ss.sources ])
+                return F(s_run ss, [ Ag_SourcesUpdated(ss.retrievalMode, ss.sources) ])
             | W_Msg(Fl_Terminate x) -> return terminate x.abnormal ss
         }
 
@@ -53,7 +54,7 @@ module StateMachine =
 
     and private s_terminate ss _ = async { return F(s_terminate ss, []) }
 
-    let create mailbox apiKey oracleModel conn sources =
+    let create mailbox apiKey oracleModel retrievalMode conn sources =
         let bus = WBus<FlowMsg, AgentMsg>.Create()
 
         let ss =
@@ -61,6 +62,7 @@ module StateMachine =
               bus = bus
               apiKey = apiKey
               oracleModel = oracleModel
+              retrievalMode = retrievalMode
               conn = conn
               sources = sources }
 

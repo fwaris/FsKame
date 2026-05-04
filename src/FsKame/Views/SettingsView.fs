@@ -8,10 +8,19 @@ open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module SettingsView =
+    let private retrievalModeToggled enabled =
+        if enabled then
+            RetrievalModeChanged FsColbertWithFallback
+        else
+            RetrievalModeChanged InternalDocumentIndex
+
     let private settingsForm model =
         Grid(
             [ Dimension.Absolute 112.; Dimension.Star; Dimension.Absolute 48. ],
-            [ Dimension.Absolute 48.; Dimension.Absolute 48.; Dimension.Absolute 48. ]
+            [ Dimension.Absolute 48.
+              Dimension.Absolute 48.
+              Dimension.Absolute 48.
+              Dimension.Absolute 48. ]
         ) {
             ViewControls.formLabel "OpenAI key" 0
 
@@ -40,13 +49,25 @@ module SettingsView =
                 .gridColumnSpan(2)
                 .margin (2.)
 
-            ViewControls.formLabel "Status" 2
+            ViewControls.formLabel "Retrieval" 2
+
+            (HStack(spacing = 8.) {
+                Switch(model.retrievalMode = FsColbertWithFallback, retrievalModeToggled).centerVertical ()
+
+                Label(RetrievalModes.displayName model.retrievalMode).font(size = 13.).centerVertical ()
+            })
+                .gridRow(2)
+                .gridColumn(1)
+                .gridColumnSpan(2)
+                .margin (2.)
+
+            ViewControls.formLabel "Status" 3
 
             Label(Update.statusText model)
                 .textColor(Update.statusColor model)
                 .font(size = 13., attributes = FontAttributes.Bold)
                 .centerVertical()
-                .gridRow(2)
+                .gridRow(3)
                 .gridColumn(1)
                 .gridColumnSpan(2)
                 .margin (2.)

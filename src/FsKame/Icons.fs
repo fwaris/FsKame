@@ -12,5 +12,6 @@ module Icons =
     let uploadFile = "\uf09b"
     let save = "\ue161"
     let clear = "\ue872"
+    let delete = "\ue872"
     let signalDisconnected = "\uf239"
     let signalConnected = "\uf0eb"
