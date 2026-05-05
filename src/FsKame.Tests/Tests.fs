@@ -85,3 +85,30 @@ let ``rank promotes exact section target over lexical distractors`` () =
         Assert.Equal(2, chunks.Head.index)
     }
     |> Async.RunSynchronously
+
+[<Fact>]
+let ``rank corrects misspelled section target before searching`` () =
+    async {
+        let source =
+            { kind = Pdf
+              location = "/tmp/paper.pdf"
+              enabled = true }
+
+        let retrieval =
+            { KnowledgeSources.emptyIndex with
+                sources = [ source ]
+                chunks =
+                    [ { source = source
+                        index = 1
+                        text = "Section: Notes\nThis appendix mentions abstract abstract abstract."
+                        score = 0.0f }
+                      { source = source
+                        index = 2
+                        text = "Section: ABSTRACT\nThis paper introduces a retrieval method."
+                        score = 0.0f } ] }
+
+        let! chunks = KnowledgeSources.rank None false false true ignore "Can you summarize the abtract?" 1 retrieval
+
+        Assert.Equal(2, chunks.Head.index)
+    }
+    |> Async.RunSynchronously

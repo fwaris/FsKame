@@ -160,6 +160,26 @@ module KnowledgeSources =
                 | _ -> chunk)
             |> List.sortByDescending (fun chunk -> chunk.score)
 
+    let private sectionHeadings (retrieval: RetrievalIndex) =
+        seq {
+            for chunk in retrieval.chunks do
+                match FsColbert.DocumentSections.tryGetHeading chunk.text with
+                | Some heading -> heading
+                | None -> ()
+
+            for _, index in retrieval.colbertIndices do
+                for passage in index.passages do
+                    match FsColbert.DocumentSections.tryGetHeading passage.reference.text with
+                    | Some heading -> heading
+                    | None -> ()
+        }
+        |> Seq.distinctBy FsColbert.DocumentSections.normalizedName
+        |> Seq.toList
+
+    let private tryResolveSectionName retrieval requested =
+        sectionHeadings retrieval
+        |> List.tryFind (fun heading -> FsColbert.DocumentSections.matches requested heading)
+
     let private createChatClient (key: string) (modelId: string) : IChatClient =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
@@ -274,6 +294,28 @@ module KnowledgeSources =
           sectionName = expansion.sectionName |> Option.bind Text.notEmpty
           queryType = expansion.queryType }
 
+    let private canonicalizeSectionTarget (retrieval: RetrievalIndex) (expansion: Expansion) =
+        match expansion.sectionName |> Option.bind (tryResolveSectionName retrieval) with
+        | None -> expansion
+        | Some canonicalSection ->
+            { expansion with
+                terms =
+                    seq {
+                        canonicalSection
+                        yield! expansion.terms
+                    }
+                    |> distinctNonEmpty
+                    |> List.truncate 12
+                rewrittenQueries =
+                    seq {
+                        canonicalSection
+                        $"section {canonicalSection}"
+                        yield! expansion.rewrittenQueries
+                    }
+                    |> distinctNonEmpty
+                    |> List.truncate 3
+                sectionName = Some canonicalSection }
+
     let getSynonyms (client: IChatClient) (report: (string -> unit) option) query : Async<Expansion option> =
         async {
             if String.IsNullOrWhiteSpace query then
@@ -341,7 +383,9 @@ Query: {query}
                     getSynonyms client r query
                 | _ -> async { return None }
 
-            let expansion = mergeExpansions localExpansion remoteExpansion
+            let expansion =
+                mergeExpansions localExpansion remoteExpansion
+                |> Option.map (canonicalizeSectionTarget retrieval)
 
             let retrievalQuery =
                 expansion
