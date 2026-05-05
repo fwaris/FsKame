@@ -19,10 +19,17 @@ module Update =
         Settings.setOracleModel model.oracleModel
         Settings.setRetrievalMode model.retrievalMode
         Settings.setPdfLibrary model.pdfDocuments
+        Settings.setLogExpansions model.logExpansions
+        Settings.setLogChunks model.logChunks
 
     let private postSources model =
         match model.bundle with
-        | Some bundle -> bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model))
+        | Some bundle ->
+            let flags =
+                {| logExpansions = model.logExpansions
+                   logChunks = model.logChunks |}
+
+            bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model, flags))
         | None -> ()
 
     let private pickAndCopyPdfs existing =
@@ -41,10 +48,10 @@ module Update =
                 return Error ex
         }
 
-    let private processPdfs (docs: PdfDocumentSource list) =
+    let private processPdfs report (docs: PdfDocumentSource list) =
         async {
             try
-                let! results = PdfLibrary.processPdfs docs
+                let! results = PdfLibrary.processPdfs report docs
                 return Ok results
             with ex ->
                 return Error ex
@@ -102,7 +109,9 @@ module Update =
           oracleModel = model.oracleModel
           retrievalMode = model.retrievalMode
           sources = sources model
-          mailbox = model.mailbox }
+          mailbox = model.mailbox
+          logExpansions = model.logExpansions
+          logChunks = model.logChunks }
 
     let init () =
         { currentPage = Main
@@ -115,7 +124,9 @@ module Update =
           pdfDocuments = Settings.pdfLibrary ()
           log = [ "FsKame ready. Add PDFs, then connect." ]
           hideSecrets = true
-          isBusy = false },
+          isBusy = false
+          logExpansions = Settings.logExpansions ()
+          logChunks = Settings.logChunks () },
         Cmd.none
 
     let update msg model =
@@ -123,6 +134,16 @@ module Update =
         | OpenAiKeyChanged value -> { model with openAiKey = value }, Cmd.none
         | OracleModelChanged value -> { model with oracleModel = value }, Cmd.none
         | RetrievalModeChanged mode -> { model with retrievalMode = mode }, Cmd.none
+        | LogExpansionsToggled value ->
+            let model = { model with logExpansions = value }
+            saveSettings model
+            postSources model
+            model, Cmd.none
+        | LogChunksToggled value ->
+            let model = { model with logChunks = value }
+            saveSettings model
+            postSources model
+            model, Cmd.none
         | Settings_Show -> { model with currentPage = Settings }, Cmd.none
         | Settings_Close ->
             saveSettings model
@@ -156,7 +177,8 @@ module Update =
             if List.isEmpty docs then
                 model, Cmd.none
             else
-                model, Cmd.OfAsync.either processPdfs docs PdfProcessingCompleted EventError
+                let report msg = model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+                model, Cmd.OfAsync.either (processPdfs report) docs PdfProcessingCompleted EventError
         | PickPdfsCompleted(Error ex) ->
             { model with
                 isBusy = false
@@ -217,8 +239,9 @@ module Update =
                     { model with
                         pdfDocuments = retryDocs ids model.pdfDocuments }
 
+                let report msg = model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
                 Settings.setPdfLibrary model.pdfDocuments
-                model, Cmd.OfAsync.either processPdfs retry PdfProcessingCompleted EventError
+                model, Cmd.OfAsync.either (processPdfs report) retry PdfProcessingCompleted EventError
         | DeletePdf id ->
             match model.pdfDocuments |> List.tryFind (fun doc -> doc.id = id) with
             | None -> model, Cmd.none

@@ -18,7 +18,9 @@ type StartParams =
       oracleModel: string
       retrievalMode: RetrievalMode
       sources: KnowledgeSource list
-      mailbox: Channel<Msg> }
+      mailbox: Channel<Msg>
+      logExpansions: bool
+      logChunks: bool }
 
 and Model =
     { currentPage: AppPage
@@ -31,7 +33,9 @@ and Model =
       pdfDocuments: PdfDocumentSource list
       log: string list
       hideSecrets: bool
-      isBusy: bool }
+      isBusy: bool
+      logExpansions: bool
+      logChunks: bool }
 
 and Msg =
     | OpenAiKeyChanged of string
@@ -55,3 +59,5 @@ and Msg =
     | Log_Append of string
     | Log_Clear
     | EventError of exn
+    | LogExpansionsToggled of bool
+    | LogChunksToggled of bool

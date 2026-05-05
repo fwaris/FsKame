@@ -20,6 +20,8 @@ module SettingsView =
             [ Dimension.Absolute 48.
               Dimension.Absolute 48.
               Dimension.Absolute 48.
+              Dimension.Absolute 48.
+              Dimension.Absolute 48.
               Dimension.Absolute 48. ]
         ) {
             ViewControls.formLabel "OpenAI key" 0
@@ -61,13 +63,27 @@ module SettingsView =
                 .gridColumnSpan(2)
                 .margin (2.)
 
-            ViewControls.formLabel "Status" 3
+            ViewControls.formLabel "Log Expansions" 3
+
+            Switch(model.logExpansions, LogExpansionsToggled)
+                .gridRow(3)
+                .gridColumn(1)
+                .centerVertical ()
+
+            ViewControls.formLabel "Log Chunks" 4
+
+            Switch(model.logChunks, LogChunksToggled)
+                .gridRow(4)
+                .gridColumn(1)
+                .centerVertical ()
+
+            ViewControls.formLabel "Status" 5
 
             Label(Update.statusText model)
                 .textColor(Update.statusColor model)
                 .font(size = 13., attributes = FontAttributes.Bold)
                 .centerVertical()
-                .gridRow(3)
+                .gridRow(5)
                 .gridColumn(1)
                 .gridColumnSpan(2)
                 .margin (2.)

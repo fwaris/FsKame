@@ -101,3 +101,15 @@ module Settings =
 
     let setRetrievalMode mode =
         Preferences.Default.Set(C.SETTINGS_RETRIEVAL_MODE, RetrievalModes.toStorageValue mode)
+
+    let logExpansions () =
+        Preferences.Default.Get(C.SETTINGS_LOG_EXPANSIONS, false)
+
+    let setLogExpansions value =
+        Preferences.Default.Set(C.SETTINGS_LOG_EXPANSIONS, value)
+
+    let logChunks () =
+        Preferences.Default.Get(C.SETTINGS_LOG_CHUNKS, false)
+
+    let setLogChunks value =
+        Preferences.Default.Set(C.SETTINGS_LOG_CHUNKS, value)

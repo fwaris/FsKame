@@ -31,7 +31,7 @@ module VoiceAgent =
                 ) }
 
     let private instructions =
-        "You are an assitant for answeriing user questions over documents. Your conversation with the user is relayed to a backend oracle. The oracle generates responses to user questions from the pdf documents as the conversation is happening. Your job is convey these answers back to the user. Only answer from the information provided. If you don't have answer you may ask the user to wait allow the oracle to catch up. Keep answers conversational and brief: usually one to three short spoken sentences."
+        "You are an assitant for answeriing user questions over documents. Your conversation with the user is relayed to a backend oracle. The oracle generates responses to user questions from the pdf documents as soon as the user is done speaking. Your job is convey these answers back to the user. Only answer from the information provided by the oracle. If you don't have the answer you may ask the user to wait allow the oracle to catch up. Don't make things up. Stay grounded. Keep answers conversational and brief: usually one to three short spoken sentences."
 
     let private updateSession (session: Session) =
         { session with
@@ -61,6 +61,12 @@ module VoiceAgent =
             event_id = Utils.newId ()
             response = Include(Some response) }
         |> ClientEvent.ResponseCreate
+        |> Connection.sendClientEvent conn
+
+    let private responseCancel conn =
+        { ResponseCancel.Default with
+            event_id = Utils.newId () }
+        |> ClientEvent.ResponseCancel
         |> Connection.sendClientEvent conn
 
     let private fallbackInstructions (snapshot: TranscriptSnapshot) =
@@ -102,6 +108,10 @@ module VoiceAgent =
                 return { st with initialized = true }
             | ServerEvent.SessionUpdated _ ->
                 st.bus.PostToAgent(Ag_Log "Realtime session updated.")
+                return st
+            | ServerEvent.InputAudioBufferSpeechStarted _ ->
+                responseCancel conn
+                st.bus.PostToAgent(Ag_Log "User interrupted; cancelling response.")
                 return st
             | ServerEvent.ConversationItemInputAudioTranscriptionDelta ev ->
                 let previous =
@@ -162,6 +172,7 @@ module VoiceAgent =
                     | Some candidate -> oracleInstructions snapshot candidate
                     | None -> fallbackInstructions snapshot
 
+                responseCancel conn
                 responseCreate conn responseInstructions
                 st.bus.PostToAgent(Ag_Log "Realtime response requested.")
 

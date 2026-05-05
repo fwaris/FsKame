@@ -34,6 +34,8 @@ module Connect =
                                 parms.retrievalMode
                                 conn
                                 parms.sources
+                                parms.logExpansions
+                                parms.logChunks
 
                         flow.PostToFlow Fl_Start
 

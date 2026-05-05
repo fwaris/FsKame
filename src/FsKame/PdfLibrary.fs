@@ -60,12 +60,14 @@ module PdfLibrary =
             return copied |> Array.toList
         }
 
-    let processPdf (doc: PdfDocumentSource) =
+    let processPdf report (doc: PdfDocumentSource) =
         async {
             let! result = KnowledgeSources.readPdfText doc.storedPath
 
             match result with
             | Ok text ->
+                let source = { kind = Pdf; location = doc.storedPath; enabled = true }
+                do! KnowledgeSources.indexSource report source
                 let chunkCount = KnowledgeSources.chunkText 1800 250 text |> List.length
 
                 return
@@ -79,11 +81,14 @@ module PdfLibrary =
                       error = Some err }
         }
 
-    let processPdfs docs =
+    let processPdfs report docs =
         async {
-            let! results = docs |> List.map processPdf |> Async.Parallel
+            let mutable results = []
+            for doc in docs do
+                let! result = processPdf report doc
+                results <- result :: results
 
-            return results |> Array.toList
+            return List.rev results
         }
 
     let deleteStoredPdf (doc: PdfDocumentSource) =

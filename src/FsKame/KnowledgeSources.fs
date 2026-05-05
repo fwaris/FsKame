@@ -4,9 +4,11 @@ open System
 open System.IO
 open System.Net.Http
 open System.Security.Cryptography
+open Microsoft.Extensions.AI
 open System.Text
 open FsKame
 open Microsoft.Maui.Storage
+open OpenAI.Chat
 open UglyToad.PdfPig.Content
 open UglyToad.PdfPig
 open UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor
@@ -15,18 +17,25 @@ module KnowledgeSources =
     type RetrievalIndex =
         { sources: KnowledgeSource list
           chunks: SourceChunk list
-          colbertIndex: FsColbert.ColbertIndex option
+          colbertIndices: (KnowledgeSource * FsColbert.ColbertIndex) list
           encoder: FsColbert.OnnxColbertEncoder option }
 
     let emptyIndex =
         { sources = []
           chunks = []
-          colbertIndex = None
+          colbertIndices = []
           encoder = None }
+        
+    type Expansion = {terms: string list}
+
+    let mutable private cachedEncoder: FsColbert.OnnxColbertEncoder option = None
 
     let disposeIndex (retrieval: RetrievalIndex) =
         retrieval.encoder
-        |> Option.iter (fun encoder -> (encoder :> IDisposable).Dispose())
+        |> Option.iter (fun encoder ->
+            (encoder :> IDisposable).Dispose()
+            if Some encoder = cachedEncoder then
+                cachedEncoder <- None)
 
     let fromPdfDocuments (docs: PdfDocumentSource list) =
         docs
@@ -158,18 +167,67 @@ module KnowledgeSources =
             |> List.sortByDescending (fun (c: SourceChunk) -> c.score, c.text.Length * -1)
             |> List.truncate maxResults
 
-    let rank (query: string) (maxResults: int) (retrieval: RetrievalIndex) : Async<SourceChunk list> =
+    let private createChatClient (key: string) (modelId: string) : IChatClient =
+        let client = OpenAI.OpenAIClient(key)
+        client.GetResponsesClient().AsIChatClient(modelId)
+
+    let getSynonyms (client: IChatClient) (report: (string -> unit) option) query =
         async {
-            match retrieval.encoder, retrieval.colbertIndex with
-            | Some encoder, Some index ->
+            if String.IsNullOrWhiteSpace query then
+                return []
+            else
+                try
+                    let prompt =
+                        $"List 5-10 synonyms, strongly related technical terms, and optionally antonyms for the primary concepts in the following query to improve search recall (especially for negated queries). Return only a space-separated list of terms, no other text.\n\nQuery: {query}"
+
+                    let opts = ChatOptions()
+                    opts.ResponseFormat <- ChatResponseFormat.ForJsonSchema<Expansion>()
+                    let! response = client.GetResponseAsync<Expansion>(prompt, opts) |> Async.AwaitTask
+                    let terms = response.Result.terms                    
+                    report |> Option.iter (fun r -> 
+                        let keywords = String.concat ", " terms
+                        r $"Expanded query keywords: {keywords}")
+
+                    return terms
+                with ex ->
+                    report |> Option.iter (fun r -> r $"Query expansion failed: {ex.ToString()}")
+                    return []
+        }
+
+    let rank (apiKey: string option) (logExpansions: bool) (logChunks: bool) (report: string -> unit) (query: string) (maxResults: int) (retrieval: RetrievalIndex) : Async<SourceChunk list> =
+        async {
+            let! searchTerms =
+                match apiKey with
+                | Some key when not (String.IsNullOrWhiteSpace key) -> 
+                    use client = createChatClient key C.NANO_MODEL
+                    let r = if logExpansions then Some report else None
+                    getSynonyms client r query
+                | _ -> async { return [] }
+
+            match retrieval.encoder, retrieval.colbertIndices with
+            | Some encoder, indices when not (List.isEmpty indices) ->
                 try
                     let options =
                         { FsColbert.SearchOptions.defaults with
                             maxResults = maxResults }
 
-                    let! hits = FsColbert.Search.query encoder options index query
+                    let! allHits =
+                        indices
+                        |> List.map (fun (_, index) -> FsColbert.Search.queryWithSearchTerms encoder options index query searchTerms)
+                        |> Async.Parallel
 
-                    return hits |> List.map (hitToChunk retrieval.sources)
+                    let context =
+                        allHits
+                        |> Array.collect (List.toArray >> Array.map (hitToChunk retrieval.sources))
+                        |> Array.sortByDescending (fun c -> c.score)
+                        |> Array.truncate maxResults
+                        |> Array.toList
+                    
+                    if logChunks then
+                        for chunk in context do
+                            report $"Retrieved chunk: [{chunk.source.DisplayName}] {chunk.text}"
+
+                    return context
                 with _ ->
                     return rankLexically query maxResults retrieval.chunks
             | _ -> return rankLexically query maxResults retrieval.chunks
@@ -185,7 +243,7 @@ module KnowledgeSources =
             return
                 { sources = sources
                   chunks = chunks
-                  colbertIndex = None
+                  colbertIndices = []
                   encoder = None },
                 errors
         }
@@ -239,6 +297,17 @@ module KnowledgeSources =
         sha.ComputeHash bytes
         |> Convert.ToHexString
         |> fun hash -> hash.ToLowerInvariant()
+
+    let private sourceIndexPath (source: KnowledgeSource) =
+        let options = FsColbert.ChunkOptions.fsKameDefaults
+
+        let fingerprint =
+            [ yield $"model={FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id}"
+              yield $"chunk={options.maxChars}:{options.overlapChars}:{options.minChars}"
+              yield sourceFingerprint source ]
+            |> String.concat "\n"
+
+        Path.Combine(indexFolder (), $"{hashText fingerprint}.fsci")
 
     let private indexPath sources =
         let options = FsColbert.ChunkOptions.fsKameDefaults
@@ -304,15 +373,20 @@ module KnowledgeSources =
 
     let private loadEncoder () =
         async {
-            use client = new HttpClient()
+            match cachedEncoder with
+            | Some e -> return e
+            | None ->
+                use client = new HttpClient()
 
-            let! files =
-                FsColbert.ModelCatalog.ensureDownloadedAsync
-                    client
-                    (modelFolder ())
-                    FsColbert.ModelCatalog.mxbaiEdgeColbertInt8
+                let! files =
+                    FsColbert.ModelCatalog.ensureDownloadedAsync
+                        client
+                        (modelFolder ())
+                        FsColbert.ModelCatalog.mxbaiEdgeColbertInt8
 
-            return FsColbert.OnnxColbertEncoder.Load files
+                let encoder = FsColbert.OnnxColbertEncoder.Load files
+                cachedEncoder <- Some encoder
+                return encoder
         }
 
     let private buildIndex report encoder documents path =
@@ -336,6 +410,33 @@ module KnowledgeSources =
             return index
         }
 
+    let indexSource report (source: KnowledgeSource) =
+        async {
+            let path = sourceIndexPath source
+
+            match tryLoadPersistedIndex path with
+            | Ok(Some _) -> () // already indexed
+            | _ ->
+                let! result = readPdfText source.location
+
+                match result with
+                | Error _ -> ()
+                | Ok text ->
+                    let doc =
+                        FsColbert.SourceDocuments.create
+                            source.location
+                            source.DisplayName
+                            source.location
+                            text
+                            source.enabled
+
+                    report $"Preparing FsColbert model for {source.DisplayName}."
+                    let! encoder = loadEncoder ()
+                    report $"Building FsColbert index for {source.DisplayName}."
+                    let! _ = buildIndex report encoder [ doc ] path
+                    ()
+        }
+
     let loadIndex report (sources: KnowledgeSource list) : Async<RetrievalIndex * string list> =
         async {
             let sources = enabledSources sources
@@ -343,93 +444,48 @@ module KnowledgeSources =
             if List.isEmpty sources then
                 return { emptyIndex with sources = sources }, []
             else
-                let path = indexPath sources
+                let! encoder = loadEncoder ()
+                let indices = ResizeArray<KnowledgeSource * FsColbert.ColbertIndex>()
+                let errors = ResizeArray<string>()
 
-                let persisted, loadErrors =
+                for source in sources do
+                    let path = sourceIndexPath source
+
                     match tryLoadPersistedIndex path with
-                    | Ok index -> index, []
-                    | Error err -> None, [ err ]
+                    | Ok(Some index) -> indices.Add(source, index)
+                    | Ok None ->
+                        // If not found, we should build it, but normally it should have been built during processing
+                        report $"Building missing FsColbert index for {source.DisplayName}."
+                        let! result = readPdfText source.location
 
-                match persisted with
-                | Some index ->
-                    let chunks = chunksFromIndex sources index
+                        match result with
+                        | Error err -> errors.Add err
+                        | Ok text ->
+                            let doc =
+                                FsColbert.SourceDocuments.create
+                                    source.location
+                                    source.DisplayName
+                                    source.location
+                                    text
+                                    source.enabled
 
-                    if List.isEmpty chunks then
-                        return
-                            { sources = sources
-                              chunks = chunks
-                              colbertIndex = None
-                              encoder = None },
-                            loadErrors
-                    else
-                        try
-                            report $"Preparing FsColbert model for {chunks.Length} cached passage(s)."
-                            let! encoder = loadEncoder ()
-                            report $"Loaded FsColbert index with {chunks.Length} passage(s)."
+                            let! index = buildIndex report encoder [ doc ] path
+                            indices.Add(source, index)
+                    | Error err -> errors.Add err
 
-                            return
-                                { sources = sources
-                                  chunks = chunks
-                                  colbertIndex = Some index
-                                  encoder = Some encoder },
-                                loadErrors
-                        with ex ->
-                            Log.log.Value.exn(ex,"loadIndex")
-                            return
-                                { sources = sources
-                                  chunks = chunks
-                                  colbertIndex = None
-                                  encoder = None },
-                                loadErrors
-                                @ [ $"FsColbert model unavailable; using lexical retrieval: {ex.Message}" ]
-                | None ->
-                    let! documents, chunks, readErrors = loadDocuments sources
+                let chunks =
+                    indices
+                    |> Seq.collect (fun (s, idx) -> chunksFromIndex [ s ] idx)
+                    |> Seq.toList
 
-                    if List.isEmpty chunks then
-                        return
-                            { sources = sources
-                              chunks = chunks
-                              colbertIndex = None
-                              encoder = None },
-                            loadErrors @ readErrors
-                    else
-                        try
-                            report $"Preparing FsColbert model for {documents.Length} PDF source(s)."
-                            let! encoder = loadEncoder ()
+                report $"Loaded FsColbert indices for {indices.Count} source(s)."
 
-                            try
-                                report $"Building FsColbert index for {chunks.Length} passage(s)."
-                                let! index = buildIndex report encoder documents path
-                                let chunks = chunksFromIndex sources index
-                                report $"Saved FsColbert index with {chunks.Length} passage(s)."
-
-                                return
-                                    { sources = sources
-                                      chunks = chunks
-                                      colbertIndex = Some index
-                                      encoder = Some encoder },
-                                    loadErrors @ readErrors
-                            with ex ->
-                                (encoder :> IDisposable).Dispose()
-
-                                return
-                                    { sources = sources
-                                      chunks = chunks
-                                      colbertIndex = None
-                                      encoder = None },
-                                    loadErrors
-                                    @ readErrors
-                                    @ [ $"FsColbert indexing unavailable; using lexical retrieval: {ex.Message}" ]
-                        with ex ->
-                            Log.log.Value.exn(ex,"LoadIndex")
-                            return
-                                { sources = sources
-                                  chunks = chunks
-                                  colbertIndex = None
-                                  encoder = None },
-                                loadErrors
-                                @ readErrors
-                                @ [ $"FsColbert model unavailable; using lexical retrieval: {ex.Message}" ]
+                return
+                    { sources = sources
+                      chunks = chunks
+                      colbertIndices = List.ofSeq indices
+                      encoder = Some encoder },
+                    List.ofSeq errors
         }
 
     let renderContext (chunks: SourceChunk list) =

@@ -5,9 +5,12 @@ module C =
     let SETTINGS_PDF_LIBRARY = "FsKame.PdfLibrary"
     let SETTINGS_ORACLE_MODEL = "FsKame.OracleModel"
     let SETTINGS_RETRIEVAL_MODE = "FsKame.RetrievalMode"
+    let SETTINGS_LOG_EXPANSIONS = "FsKame.LogExpansions"
+    let SETTINGS_LOG_CHUNKS = "FsKame.LogChunks"
 
     let DEFAULT_ORACLE_MODEL = "gpt-5.1"
     let DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
+    let NANO_MODEL = "gpt-5.4-nano"
     let MAX_LOG = 250
     let FONT_REG = "OpenSansRegular"
     let FONT_BOLD = "OpenSansSemibold"

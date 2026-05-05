@@ -42,6 +42,8 @@
     <UseInterpreter>true</UseInterpreter>
     <MtouchInterpreter>-all</MtouchInterpreter>
     <RunAOTCompilation>false</RunAOTCompilation>
+    <CodesignKey>-</CodesignKey>
+    <CodesignExtraArgs>--deep</CodesignExtraArgs>
   </PropertyGroup>
 
   <ItemGroup>
@@ -128,6 +130,7 @@
 
   <ItemGroup>
     <PackageReference Include="Fabulous.MauiControls" />
+    <PackageReference Include="FsAICore" />
     <PackageReference Include="FSharp.Control.AsyncSeq" />
     <PackageReference Include="FSharp.Core" />
     <PackageReference Include="FSharp.DI" />

@@ -13,12 +13,14 @@ module StateMachine =
           oracleModel: string
           retrievalMode: RetrievalMode
           conn: RTOpenAI.Api.Connection
-          sources: KnowledgeSource list }
+          sources: KnowledgeSource list
+          logExpansions: bool
+          logChunks: bool }
 
     let private startAgents ss =
         async {
             AppAgent.start ss.mailbox ss.bus
-            SourceAgent.start ss.bus
+            SourceAgent.start (Some ss.apiKey) ss.bus
             OracleAgent.start ss.apiKey ss.oracleModel ss.bus
             VoiceAgent.start ss.apiKey ss.conn ss.bus
         }
@@ -40,7 +42,8 @@ module StateMachine =
             | W_Err err -> return F(s_terminate ss, [ Ag_FlowError err; Ag_FlowDone {| abnormal = true |} ])
             | W_Msg Fl_Start ->
                 do! startAgents ss
-                return F(s_run ss, [ Ag_SourcesUpdated(ss.retrievalMode, ss.sources) ])
+                let flags = {| logExpansions = ss.logExpansions; logChunks = ss.logChunks |}
+                return F(s_run ss, [ Ag_SourcesUpdated(ss.retrievalMode, ss.sources, flags) ])
             | W_Msg(Fl_Terminate x) -> return terminate x.abnormal ss
         }
 
@@ -54,7 +57,7 @@ module StateMachine =
 
     and private s_terminate ss _ = async { return F(s_terminate ss, []) }
 
-    let create mailbox apiKey oracleModel retrievalMode conn sources =
+    let create mailbox apiKey oracleModel retrievalMode conn sources logExpansions logChunks =
         let bus = WBus<FlowMsg, AgentMsg>.Create()
 
         let ss =
@@ -64,7 +67,9 @@ module StateMachine =
               oracleModel = oracleModel
               retrievalMode = retrievalMode
               conn = conn
-              sources = sources }
+              sources = sources
+              logExpansions = logExpansions
+              logChunks = logChunks }
 
         RTFlow.Workflow.run CancellationToken.None bus (s_start ss)
 
