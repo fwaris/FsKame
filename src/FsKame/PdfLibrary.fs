@@ -62,13 +62,20 @@ module PdfLibrary =
 
     let processPdf report (doc: PdfDocumentSource) =
         async {
-            let! result = KnowledgeSources.readPdfBlocks doc.storedPath
+            let! result = FsColbert.PdfDocuments.readBlocks doc.storedPath
 
             match result with
             | Ok blocks ->
-                let source = { kind = Pdf; location = doc.storedPath; enabled = true }
+                let source =
+                    { kind = Pdf
+                      location = doc.storedPath
+                      enabled = true }
+
                 do! KnowledgeSources.InindexSource report source
-                let structuralChunks = KnowledgeSources.chunkBlocks 1800 250 blocks
+
+                let structuralChunks =
+                    FsColbert.DocumentChunking.chunkSectionedBlocks FsColbert.ChunkOptions.fsKameDefaults blocks
+
                 let chunkCount = structuralChunks.Length
 
                 return
@@ -85,6 +92,7 @@ module PdfLibrary =
     let processPdfs report docs =
         async {
             let mutable results = []
+
             for doc in docs do
                 let! result = processPdf report doc
                 results <- result :: results

@@ -139,7 +139,6 @@
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Extensions" />
-    <PackageReference Include="PdfPig" />
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />
     <PackageReference Include="RTFlow" />

@@ -20,7 +20,10 @@ module Text =
             |> Seq.toList
 
     let normalizeWhitespace (value: string) =
-        Regex.Replace(defaultArg (Option.ofObj value) "", @"\s+", " ").Trim()
+        let dehyphenated =
+            Regex.Replace(defaultArg (Option.ofObj value) "", @"(\p{L})-\s+(\p{Ll})", "$1$2")
+
+        Regex.Replace(dehyphenated, @"\s+", " ").Trim()
 
     let stripHtml (html: string) =
         let withoutScripts = Regex.Replace(html, "(?is)<(script|style).*?</\\1>", " ")

@@ -16,7 +16,6 @@
     <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.7" />
     <PackageVersion Include="Microsoft.Maui.Controls" Version="10.0.51" />
     <PackageVersion Include="Microsoft.Maui.Controls.Compatibility" Version="10.0.51" />
-    <PackageVersion Include="PdfPig" Version="0.1.14" />
     <PackageVersion Include="RTOpenAI.Api" Version="0.9.3.3" />
     <PackageVersion Include="RTOpenAI.Events" Version="0.9.3.3" />
     <PackageVersion Include="RTFlow" Version="0.9.3.3" />

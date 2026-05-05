@@ -7,12 +7,10 @@ open System.Security.Cryptography
 open System.Text.Json.Serialization
 open Microsoft.Extensions.AI
 open System.Text
+open System.Text.RegularExpressions
 open FsKame
 open Microsoft.Maui.Storage
 open OpenAI.Chat
-open UglyToad.PdfPig.Content
-open UglyToad.PdfPig
-open UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor
 
 module KnowledgeSources =
     type RetrievalIndex =
@@ -26,20 +24,28 @@ module KnowledgeSources =
           chunks = []
           colbertIndices = []
           encoder = None }
-            
+
     [<JsonConverter(typeof<JsonStringEnumConverter>)>]
     [<RequireQualifiedAccess>]
-    type QueryType =        
+    type QueryType =
         | Question = 1
-        | SectionRetrieval = 2           
-    type Expansion = {terms: string list; queryType:QueryType}
+        | SectionRetrieval = 2
+
+    type Expansion =
+        { terms: string list
+          rewrittenQueries: string list
+          sectionName: string option
+          queryType: QueryType }
 
     let mutable private cachedEncoder: FsColbert.OnnxColbertEncoder option = None
+
+    let private pdfIndexVersion = FsColbert.DocumentChunking.representationVersion
 
     let disposeIndex (retrieval: RetrievalIndex) =
         retrieval.encoder
         |> Option.iter (fun encoder ->
             (encoder :> IDisposable).Dispose()
+
             if Some encoder = cachedEncoder then
                 cachedEncoder <- None)
 
@@ -53,95 +59,7 @@ module KnowledgeSources =
 
     let selectedSources (docs: PdfDocumentSource list) = fromPdfDocuments docs
 
-    let private pageImageNotes (page: Page) =
-        let images = page.GetImages() |> Seq.toList
-
-        if List.isEmpty images then
-            ""
-        else
-            images
-            |> List.mapi (fun index image ->
-                $"[PDF image note: page {page.Number}, image {index + 1}, {image.WidthInSamples}x{image.HeightInSamples} samples. Embedded image detected during PDF processing.]")
-            |> String.concat "\n"
-
-    let readPdfBlocks path =
-        async {
-            if not (File.Exists path) then
-                return Error $"PDF not found: {path}"
-            else
-                try
-                    use document = PdfDocument.Open(path)
-                    let wordExtractor = UglyToad.PdfPig.DocumentLayoutAnalysis.WordExtractor.NearestNeighbourWordExtractor.Instance
-                    let pageSegmenter = UglyToad.PdfPig.DocumentLayoutAnalysis.PageSegmenter.DocstrumBoundingBoxes.Instance
-
-                    let blocks =
-                        document.GetPages()
-                        |> Seq.collect (fun page ->
-                            let words = wordExtractor.GetWords(page.Letters)
-                            let pageBlocks = pageSegmenter.GetBlocks(words)
-                            let imageNote = pageImageNotes page
-                            let blockTexts = pageBlocks |> Seq.map (fun b -> b.Text)
-                            if String.IsNullOrWhiteSpace imageNote then
-                                blockTexts
-                            else
-                                Seq.append blockTexts [imageNote]
-                        )
-                        |> Seq.map Text.normalizeWhitespace
-                        |> Seq.filter (String.IsNullOrWhiteSpace >> not)
-                        |> Seq.toList
-
-                    return Ok blocks
-                with ex ->
-                    return Error $"Unable to read PDF '{path}': {ex.Message}"
-        }
-
-    let readPdfText path =
-        async {
-            let! result = readPdfBlocks path
-            return result |> Result.map (String.concat "\n\n")
-        }
-
-    let chunkBlocks size overlap (blocks: string list) =
-        let rec loop remaining currentChunk currentLen chunks =
-            match remaining with
-            | [] -> 
-                if List.isEmpty currentChunk then chunks
-                else (List.rev currentChunk |> String.concat "\n\n") :: chunks
-            | (block: string) :: rest ->
-                let blockLen = block.Length
-                
-                if blockLen > size && List.isEmpty currentChunk then
-                    // Block is too big, let FsColbert string chunker handle it later or just emit it
-                    // Emitting as is, we will apply string chunker on oversized blocks in loadChunks
-                    loop rest [] 0 (block :: chunks)
-                elif currentLen + blockLen + 2 > size && not (List.isEmpty currentChunk) then
-                    let chunkText = List.rev currentChunk |> String.concat "\n\n"
-                    
-                    let rec getOverlap acc accLen revChunk =
-                        match revChunk with
-                        | [] -> acc
-                        | (b: string) :: bs ->
-                            if List.length acc = List.length currentChunk - 1 then acc
-                            elif accLen + b.Length + 2 > overlap && not (List.isEmpty acc) then acc
-                            else getOverlap (b :: acc) (accLen + b.Length + 2) bs
-                            
-                    let overlapBlocks = getOverlap [] 0 currentChunk
-                    let overlapLen = overlapBlocks |> List.sumBy (fun (x:string) -> x.Length) |> (+) (if overlapBlocks.Length > 0 then (overlapBlocks.Length - 1) * 2 else 0)
-                    
-                    loop remaining overlapBlocks overlapLen (chunkText :: chunks)
-                else
-                    loop rest (block :: currentChunk) (currentLen + blockLen + 2) chunks
-
-        loop blocks [] 0 []
-        |> List.rev
-
-    let chunkText size overlap (text: string) =
-        let options =
-            { FsColbert.ChunkOptions.fsKameDefaults with
-                maxChars = size
-                overlapChars = overlap }
-
-        FsColbert.Text.chunkText options text
+    let private fsKameChunkOptions = FsColbert.ChunkOptions.fsKameDefaults
 
     let loadChunks (sources: KnowledgeSource list) : Async<SourceChunk list * string list> =
         async {
@@ -152,7 +70,7 @@ module KnowledgeSources =
                     async {
                         let! result =
                             match source.kind with
-                            | Pdf -> readPdfBlocks source.location
+                            | Pdf -> FsColbert.PdfDocuments.readBlocks source.location
 
                         return source, result
                     })
@@ -164,27 +82,20 @@ module KnowledgeSources =
             for source, result in loaded do
                 match result with
                 | Ok blocks ->
-                    let structuralChunks = chunkBlocks 1800 250 blocks
+                    let structuralChunks =
+                        FsColbert.DocumentChunking.chunkSectionedBlocks fsKameChunkOptions blocks
+
                     let mutable chunkIndex = 0
+
                     for sChunk in structuralChunks do
-                        // If a single structural chunk is still > 1800 (giant block), fall back to char slicing
-                        if sChunk.Length > 1800 then
-                            for _, snip in chunkText 1800 250 sChunk do
-                                chunks.Add(
-                                    { source = source
-                                      index = chunkIndex
-                                      text = snip
-                                      score = 0.0f }
-                                )
-                                chunkIndex <- chunkIndex + 1
-                        else
-                            chunks.Add(
-                                { source = source
-                                  index = chunkIndex
-                                  text = sChunk
-                                  score = 0.0f }
-                            )
-                            chunkIndex <- chunkIndex + 1
+                        chunks.Add(
+                            { source = source
+                              index = chunkIndex
+                              text = sChunk
+                              score = 0.0f }
+                        )
+
+                        chunkIndex <- chunkIndex + 1
                 | Error err -> errors.Add err
 
             return List.ofSeq chunks, List.ofSeq errors
@@ -236,9 +147,132 @@ module KnowledgeSources =
             |> List.sortByDescending (fun (c: SourceChunk) -> c.score, c.text.Length * -1)
             |> List.truncate maxResults
 
+    let private applySectionBoost sectionName (chunks: SourceChunk list) =
+        match sectionName with
+        | None -> chunks
+        | Some requested ->
+            chunks
+            |> List.map (fun chunk ->
+                match FsColbert.DocumentSections.tryGetHeading chunk.text with
+                | Some heading when FsColbert.DocumentSections.matches requested heading ->
+                    { chunk with
+                        score = chunk.score + 1.0f }
+                | _ -> chunk)
+            |> List.sortByDescending (fun chunk -> chunk.score)
+
     let private createChatClient (key: string) (modelId: string) : IChatClient =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
+
+    let private retrievalActionTerms =
+        [ "about"
+          "can"
+          "could"
+          "describe"
+          "explain"
+          "extract"
+          "find"
+          "give"
+          "list"
+          "please"
+          "provide"
+          "section"
+          "show"
+          "summarise"
+          "summarize"
+          "summary"
+          "tell"
+          "the"
+          "what"
+          "would"
+          "you" ]
+        |> Set.ofList
+
+    let private distinctNonEmpty (values: string seq) =
+        values
+        |> Seq.choose Text.notEmpty
+        |> Seq.distinctBy _.ToLowerInvariant()
+        |> Seq.toList
+
+    let private compactTerms (values: string seq) =
+        values
+        |> Seq.collect Text.terms
+        |> Seq.filter (fun term -> not (retrievalActionTerms.Contains term))
+        |> Seq.distinct
+        |> Seq.truncate 12
+        |> Seq.toList
+
+    let private cleanupRetrievalTarget (target: string) =
+        let withoutSourceTail =
+            Regex.Replace(target, @"(?i)\b(?:from|in|of)\s+(?:the\s+)?(?:paper|document|pdf|article|source)\b.*$", "")
+
+        Regex.Replace(withoutSourceTail, @"[?.!,;:\s]+$", "").Trim()
+
+    let private tryExtractRetrievalTarget (query: string) =
+        let patterns =
+            [ @"(?i)^\s*(?:can|could|would)\s+you\s+(?:please\s+)?(?:summari[sz]e|explain|describe|outline|extract|find|show|give|provide|tell\s+me\s+about)\s+(?:the\s+|a\s+|an\s+)?(?<target>[\p{L}\p{N}\s_/\-.'&()]{3,100})\s*[?.!]*\s*$"
+              @"(?i)^\s*(?:please\s+)?(?:summari[sz]e|explain|describe|outline|extract|find|show|give|provide|tell\s+me\s+about)\s+(?:the\s+|a\s+|an\s+)?(?<target>[\p{L}\p{N}\s_/\-.'&()]{3,100})\s*[?.!]*\s*$" ]
+
+        patterns
+        |> List.tryPick (fun pattern ->
+            let m = Regex.Match(query, pattern)
+
+            if m.Success then
+                m.Groups["target"].Value |> cleanupRetrievalTarget |> Text.notEmpty
+            else
+                None)
+
+    let private createLocalExpansion query =
+        if String.IsNullOrWhiteSpace query then
+            None
+        else
+            let target = tryExtractRetrievalTarget query
+
+            let queryType =
+                if Option.isSome target then
+                    QueryType.SectionRetrieval
+                else
+                    QueryType.Question
+
+            let rewrittenQueries =
+                match target with
+                | Some value -> [ value; $"section {value}" ]
+                | None -> [ query ]
+
+            let terms =
+                match target with
+                | Some value -> compactTerms [ value; $"section {value}" ]
+                | None -> compactTerms [ query ]
+
+            Some
+                { terms = terms
+                  rewrittenQueries = distinctNonEmpty rewrittenQueries
+                  sectionName = target
+                  queryType = queryType }
+
+    let private mergeExpansions localExpansion remoteExpansion =
+        match localExpansion, remoteExpansion with
+        | None, None -> None
+        | Some local, None -> Some local
+        | None, Some remote -> Some remote
+        | Some local, Some remote ->
+            let queryType =
+                if local.queryType = QueryType.SectionRetrieval then
+                    QueryType.SectionRetrieval
+                else
+                    remote.queryType
+
+            Some
+                { terms = distinctNonEmpty (Seq.append local.terms remote.terms)
+                  rewrittenQueries = distinctNonEmpty (Seq.append local.rewrittenQueries remote.rewrittenQueries)
+                  sectionName = remote.sectionName |> Option.orElse local.sectionName
+                  queryType = queryType }
+
+    let private sanitizeExpansion (expansion: Expansion) =
+        { terms = distinctNonEmpty expansion.terms |> List.truncate 12
+          rewrittenQueries = distinctNonEmpty expansion.rewrittenQueries |> List.truncate 3
+          sectionName = expansion.sectionName |> Option.bind Text.notEmpty
+          queryType = expansion.queryType }
 
     let getSynonyms (client: IChatClient) (report: (string -> unit) option) query : Async<Expansion option> =
         async {
@@ -248,19 +282,31 @@ module KnowledgeSources =
                 try
                     let prompt =
                         $"""
-List 2-3 synonyms, strongly related technical terms, and optionally antonyms for the primary concepts in the following query to improve search recall (especially for negated queries). Return only a space-separated list of terms.
-Also classify the query as type of 'Question' or SectionRetrieval.
-Note that operational commands like 'Can you summarize the <section>', etc. are not questions for which answer needs to be generated but are equivalent to 'summarize the <section>'. Distinguish between true questions and request to perform an operation.
+Create compact retrieval signals for searching PDF passages.
+
+Return JSON matching the schema:
+- terms: at most 8 content keywords, aliases, or technical terms likely to appear in relevant passages. Avoid generic action words such as summarize, explain, describe, question, answer, paper, document, and PDF.
+- rewrittenQueries: 1-2 short retrieval queries that describe the information to find, not the operation to perform. For a named section request, include the canonical target, e.g. "abstract" and "section abstract".
+- sectionName: the named section, table, figure, appendix, or other document part being requested, or null when there is no such target.
+- queryType: "Question" for factual questions; "SectionRetrieval" for requests to retrieve, summarize, explain, list, or show a named or broad document section.
+
+Do not answer the user. Only provide retrieval signals.
 
 Query: {query}
 """
+
                     let opts = ChatOptions()
                     opts.ResponseFormat <- ChatResponseFormat.ForJsonSchema<Expansion>()
                     let! response = client.GetResponseAsync<Expansion>(prompt, opts) |> Async.AwaitTask
-                    let expansion = response.Result
-                    report |> Option.iter (fun r -> 
+                    let expansion = sanitizeExpansion response.Result
+
+                    report
+                    |> Option.iter (fun r ->
                         let keywords = String.concat ", " expansion.terms
-                        r $"Query type: {expansion.queryType}. Expanded keywords: {keywords}")
+                        let rewrites = String.concat " | " expansion.rewrittenQueries
+
+                        r
+                            $"Query type: {expansion.queryType}. Retrieval query: {rewrites}. Expanded keywords: {keywords}")
 
                     return Some expansion
                 with ex ->
@@ -268,31 +314,91 @@ Query: {query}
                     return None
         }
 
-    let private getSearchWeights = function
+    let private getSearchWeights =
+        function
         | QueryType.Question -> 1.0f, 0.1f
-        | QueryType.SectionRetrieval -> 0.1f, 1.0f
+        | QueryType.SectionRetrieval -> 0.65f, 1.0f
         | _ -> 1.0f, 1.0f
 
-    let rank (apiKey: string option) (logExpansions: bool) (logChunks: bool) (useLexicalFilter: bool) (report: string -> unit) (query: string) (maxResults: int) (retrieval: RetrievalIndex) : Async<SourceChunk list> =
+    let rank
+        (apiKey: string option)
+        (logExpansions: bool)
+        (logChunks: bool)
+        (useLexicalFilter: bool)
+        (report: string -> unit)
+        (query: string)
+        (maxResults: int)
+        (retrieval: RetrievalIndex)
+        : Async<SourceChunk list> =
         async {
-            let! expansion =
+            let localExpansion = createLocalExpansion query
+
+            let! remoteExpansion =
                 match apiKey, useLexicalFilter with
-                | Some key, true when not (String.IsNullOrWhiteSpace key) -> 
+                | Some key, true when not (String.IsNullOrWhiteSpace key) ->
                     use client = createChatClient key C.NANO_MODEL
                     let r = if logExpansions then Some report else None
                     getSynonyms client r query
                 | _ -> async { return None }
 
-            let searchTerms = expansion |> Option.map (fun e -> e.terms) |> Option.defaultValue []
-            let queryType = expansion |> Option.map (fun e -> e.queryType) |> Option.defaultValue QueryType.Question
+            let expansion = mergeExpansions localExpansion remoteExpansion
+
+            let retrievalQuery =
+                expansion
+                |> Option.bind (fun e -> e.rewrittenQueries |> List.tryHead)
+                |> Option.defaultValue query
+
+            let searchTerms =
+                expansion
+                |> Option.map (fun e ->
+                    [ yield! e.terms
+                      match e.sectionName with
+                      | Some sectionName -> yield sectionName
+                      | None -> () ])
+                |> Option.defaultValue []
+                |> distinctNonEmpty
+
+            let queryType =
+                expansion
+                |> Option.map (fun e -> e.queryType)
+                |> Option.defaultValue QueryType.Question
+
+            let lexicalQuery =
+                if List.isEmpty searchTerms then
+                    retrievalQuery
+                else
+                    String.concat " " searchTerms
+
+            let sectionName = expansion |> Option.bind (fun e -> e.sectionName)
+
+            let lexicalFallback () =
+                let lexicalMaxResults =
+                    match queryType with
+                    | QueryType.SectionRetrieval -> max maxResults 20
+                    | _ -> maxResults
+
+                retrieval.chunks
+                |> rankLexically lexicalQuery lexicalMaxResults
+                |> applySectionBoost sectionName
+                |> List.truncate maxResults
 
             match retrieval.encoder, retrieval.colbertIndices with
             | Some encoder, indices when not (List.isEmpty indices) ->
                 try
                     let denseWeight, lexicalWeight = getSearchWeights queryType
+
+                    let rawMaxResults =
+                        match queryType with
+                        | QueryType.SectionRetrieval -> max maxResults 20
+                        | _ -> maxResults
+
                     let options =
                         { FsColbert.SearchOptions.defaults with
-                            maxResults = maxResults
+                            maxResults = rawMaxResults
+                            candidateLimit =
+                                match queryType with
+                                | QueryType.SectionRetrieval -> max FsColbert.SearchOptions.defaults.candidateLimit 256
+                                | _ -> FsColbert.SearchOptions.defaults.candidateLimit
                             useLexicalFilter = useLexicalFilter
                             useRRF = true
                             denseWeight = denseWeight
@@ -300,24 +406,27 @@ Query: {query}
 
                     let! allHits =
                         indices
-                        |> List.map (fun (_, index) -> FsColbert.Search.queryWithSearchTerms encoder options index query searchTerms)
+                        |> List.map (fun (_, index) ->
+                            FsColbert.Search.queryWithSearchTerms encoder options index retrievalQuery searchTerms)
                         |> Async.Parallel
 
                     let context =
                         allHits
                         |> Array.collect (List.toArray >> Array.map (hitToChunk retrieval.sources))
                         |> Array.sortByDescending (fun c -> c.score)
-                        |> Array.truncate maxResults
+                        |> Array.truncate rawMaxResults
                         |> Array.toList
-                    
+                        |> applySectionBoost sectionName
+                        |> List.truncate maxResults
+
                     if logChunks then
                         for chunk in context do
                             report $"Retrieved chunk: [{chunk.source.DisplayName}] {chunk.text}"
 
                     return context
                 with _ ->
-                    return rankLexically query maxResults retrieval.chunks
-            | _ -> return rankLexically query maxResults retrieval.chunks
+                    return lexicalFallback ()
+            | _ -> return lexicalFallback ()
         }
 
     let private enabledSources sources = sources |> List.filter _.enabled
@@ -390,6 +499,7 @@ Query: {query}
 
         let fingerprint =
             [ yield $"model={FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id}"
+              yield $"pdfIndexVersion={pdfIndexVersion}"
               yield $"chunk={options.maxChars}:{options.overlapChars}:{options.minChars}"
               yield sourceFingerprint source ]
             |> String.concat "\n"
@@ -401,6 +511,7 @@ Query: {query}
 
         let fingerprint =
             [ yield $"model={FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id}"
+              yield $"pdfIndexVersion={pdfIndexVersion}"
               yield $"chunk={options.maxChars}:{options.overlapChars}:{options.minChars}"
               yield! (sources |> List.map sourceFingerprint |> List.sort) ]
             |> String.concat "\n"
@@ -415,48 +526,6 @@ Query: {query}
                 Error $"Unable to load FsColbert index '{path}': {ex.Message}"
         else
             Ok None
-
-    let private loadDocuments sources =
-        async {
-            let! loaded =
-                sources
-                |> List.map (fun source ->
-                    async {
-                        let! result =
-                            match source.kind with
-                            | Pdf -> readPdfText source.location
-
-                        return source, result
-                    })
-                |> Async.Parallel
-
-            let documents = ResizeArray<FsColbert.SourceDocument>()
-            let chunks = ResizeArray<SourceChunk>()
-            let errors = ResizeArray<string>()
-
-            for source, result in loaded do
-                match result with
-                | Ok text ->
-                    documents.Add(
-                        FsColbert.SourceDocuments.create
-                            source.location
-                            source.DisplayName
-                            source.location
-                            text
-                            source.enabled
-                    )
-
-                    for index, snip in chunkText 1800 250 text do
-                        chunks.Add(
-                            { source = source
-                              index = index
-                              text = snip
-                              score = 0.0f }
-                        )
-                | Error err -> errors.Add err
-
-            return List.ofSeq documents, List.ofSeq chunks, List.ofSeq errors
-        }
 
     let private loadEncoder () =
         async {
@@ -476,27 +545,6 @@ Query: {query}
                 return encoder
         }
 
-    let private buildIndex report encoder documents path =
-        async {
-            let mutable lastReported = -1
-
-            let progress (update: FsColbert.IndexProgress) =
-                if update.totalPassages > 0 then
-                    let completed = update.completedPassages
-
-                    if
-                        completed = 0
-                        || completed = update.totalPassages
-                        || completed - lastReported >= 10
-                    then
-                        lastReported <- completed
-                        report $"FsColbert indexed {completed}/{update.totalPassages} passage(s)."
-
-            let! index = FsColbert.IndexBuilder.createWithDefaults encoder documents (Some progress)
-            FsColbert.IndexPersistence.save path index
-            return index
-        }
-
     let private buildIndexFromChunks report encoder (passages: FsColbert.PassageRef list) path =
         async {
             let mutable lastReported = -1
@@ -513,20 +561,22 @@ Query: {query}
                         lastReported <- completed
                         report $"FsColbert indexed {completed}/{update.totalPassages} passage(s)."
 
-            let! index = FsColbert.IndexBuilder.createFromPassages encoder FsColbert.ChunkOptions.fsKameDefaults passages (Some progress)
+            let! index =
+                FsColbert.IndexBuilder.createFromPassages
+                    encoder
+                    FsColbert.ChunkOptions.fsKameDefaults
+                    passages
+                    (Some progress)
+
             FsColbert.IndexPersistence.save path index
             return index
         }
 
-    let private chunksToPassages (source: KnowledgeSource) (blocks: string list) : FsColbert.PassageRef list =
-        let structuralChunks = chunkBlocks 1800 250 blocks
-        structuralChunks
-        |> List.mapi (fun index text ->
-            { FsColbert.PassageRef.sourceId = source.location
-              sourceDisplayName = source.DisplayName
-              sourceLocation = source.location
-              index = index
-              text = text })
+    let private passageSource (source: KnowledgeSource) =
+        FsColbert.PassageSource.create source.location source.DisplayName source.location
+
+    let private readPdfPassages (source: KnowledgeSource) =
+        FsColbert.PdfDocuments.readPassages fsKameChunkOptions (passageSource source) source.location
 
     let InindexSource report (source: KnowledgeSource) =
         async {
@@ -535,13 +585,11 @@ Query: {query}
             match tryLoadPersistedIndex path with
             | Ok(Some _) -> () // already indexed
             | _ ->
-                let! result = readPdfBlocks source.location
+                let! result = readPdfPassages source
 
                 match result with
                 | Error _ -> ()
-                | Ok blocks ->
-                    let passages = chunksToPassages source blocks
-
+                | Ok passages ->
                     report $"Preparing FsColbert model for {source.DisplayName}."
                     let! encoder = loadEncoder ()
                     report $"Building FsColbert index for {source.DisplayName}."
@@ -568,20 +616,17 @@ Query: {query}
                     | Ok None ->
                         // If not found, we should build it, but normally it should have been built during processing
                         report $"Building missing FsColbert index for {source.DisplayName}."
-                        let! result = readPdfBlocks source.location
+                        let! result = readPdfPassages source
 
                         match result with
                         | Error err -> errors.Add err
-                        | Ok blocks ->
-                            let passages = chunksToPassages source blocks
+                        | Ok passages ->
                             let! index = buildIndexFromChunks report encoder passages path
                             indices.Add(source, index)
                     | Error err -> errors.Add err
 
                 let chunks =
-                    indices
-                    |> Seq.collect (fun (s, idx) -> chunksFromIndex [ s ] idx)
-                    |> Seq.toList
+                    indices |> Seq.collect (fun (s, idx) -> chunksFromIndex [ s ] idx) |> Seq.toList
 
                 report $"Loaded FsColbert indices for {indices.Count} source(s)."
 

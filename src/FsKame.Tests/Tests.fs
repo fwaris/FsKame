@@ -13,9 +13,18 @@ type MockChatClient() =
     interface IChatClient with
         member this.Dispose() = ()
         member this.GetService(serviceType: Type, serviceKey: obj) = null
+
         member this.GetResponseAsync(chatMessages, options, cancellationToken) =
-            let response = ChatResponse(ChatMessage(ChatRole.Assistant, "synonym1 antonym1 technicalTerm1"))
+            let response =
+                ChatResponse(
+                    ChatMessage(
+                        ChatRole.Assistant,
+                        """{"terms":["synonym1","technicalTerm1"],"rewrittenQueries":["technical query"],"sectionName":null,"queryType":"Question"}"""
+                    )
+                )
+
             Task.FromResult(response)
+
         member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() } :> IAsyncEnumerable<ChatResponseUpdate>
 
@@ -28,19 +37,51 @@ let ``getSynonyms parses comma-separated keywords correctly`` () =
         let client = new MockChatClient()
         let mutable reportedMsg = ""
         let report msg = reportedMsg <- msg
-        let! terms = KnowledgeSources.getSynonyms client (Some report) "query"
-        
-        Assert.Equal<int>(3, terms.Length)
-        Assert.Contains("synonym1", terms)
-        Assert.Contains("antonym1", terms)
-        Assert.Contains("technicalTerm1", terms)
-        Assert.Contains("Expanded query keywords", reportedMsg)
-    } |> Async.RunSynchronously
+        let! expansion = KnowledgeSources.getSynonyms client (Some report) "query"
+
+        match expansion with
+        | Some expansion ->
+            Assert.Equal<int>(2, expansion.terms.Length)
+            Assert.Contains("synonym1", expansion.terms)
+            Assert.Contains("technicalTerm1", expansion.terms)
+            Assert.Equal<QueryType>(QueryType.Question, expansion.queryType)
+            Assert.Contains("Retrieval query", reportedMsg)
+        | None -> failwith "Expected query expansion."
+    }
+    |> Async.RunSynchronously
 
 [<Fact>]
 let ``getSynonyms handles empty query`` () =
     async {
         let client = new MockChatClient()
-        let! terms = KnowledgeSources.getSynonyms client None ""
-        Assert.Empty(terms)
-    } |> Async.RunSynchronously
+        let! expansion = KnowledgeSources.getSynonyms client None ""
+        Assert.True(Option.isNone expansion)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``rank promotes exact section target over lexical distractors`` () =
+    async {
+        let source =
+            { kind = Pdf
+              location = "/tmp/paper.pdf"
+              enabled = true }
+
+        let retrieval =
+            { KnowledgeSources.emptyIndex with
+                sources = [ source ]
+                chunks =
+                    [ { source = source
+                        index = 1
+                        text = "Section: Notes\nThis appendix mentions abstract abstract abstract."
+                        score = 0.0f }
+                      { source = source
+                        index = 2
+                        text = "Section: ABSTRACT\nThis paper introduces a retrieval method."
+                        score = 0.0f } ] }
+
+        let! chunks = KnowledgeSources.rank None false false true ignore "Can you summarize the abstract?" 1 retrieval
+
+        Assert.Equal(2, chunks.Head.index)
+    }
+    |> Async.RunSynchronously
