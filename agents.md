@@ -108,3 +108,7 @@ Based on Microsoft F# style guidance and common community conventions:
 - Add mutation only where measured and justified.
 - Introduce classes only for integration/stateful boundaries.
 - Keep the public surface area simple, explicit, and domain-oriented.
+
+
+# Experimental Coding
+- Put temporary, exploratory and/or experimental code in the /temp directory of the project.

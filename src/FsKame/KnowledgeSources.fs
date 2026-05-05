@@ -58,27 +58,76 @@ module KnowledgeSources =
                 $"[PDF image note: page {page.Number}, image {index + 1}, {image.WidthInSamples}x{image.HeightInSamples} samples. Embedded image detected during PDF processing.]")
             |> String.concat "\n"
 
-    let readPdfText path =
+    let readPdfBlocks path =
         async {
             if not (File.Exists path) then
                 return Error $"PDF not found: {path}"
             else
                 try
                     use document = PdfDocument.Open(path)
+                    let wordExtractor = UglyToad.PdfPig.DocumentLayoutAnalysis.WordExtractor.NearestNeighbourWordExtractor.Instance
+                    let pageSegmenter = UglyToad.PdfPig.DocumentLayoutAnalysis.PageSegmenter.DocstrumBoundingBoxes.Instance
 
-                    let text =
+                    let blocks =
                         document.GetPages()
-                        |> Seq.map (fun page ->
-                            [ ContentOrderTextExtractor.GetText page; pageImageNotes page ]
-                            |> List.filter (String.IsNullOrWhiteSpace >> not)
-                            |> String.concat "\n")
-                        |> String.concat "\n\n"
-                        |> Text.normalizeWhitespace
+                        |> Seq.collect (fun page ->
+                            let words = wordExtractor.GetWords(page.Letters)
+                            let pageBlocks = pageSegmenter.GetBlocks(words)
+                            let imageNote = pageImageNotes page
+                            let blockTexts = pageBlocks |> Seq.map (fun b -> b.Text)
+                            if String.IsNullOrWhiteSpace imageNote then
+                                blockTexts
+                            else
+                                Seq.append blockTexts [imageNote]
+                        )
+                        |> Seq.map Text.normalizeWhitespace
+                        |> Seq.filter (String.IsNullOrWhiteSpace >> not)
+                        |> Seq.toList
 
-                    return Ok text
+                    return Ok blocks
                 with ex ->
                     return Error $"Unable to read PDF '{path}': {ex.Message}"
         }
+
+    let readPdfText path =
+        async {
+            let! result = readPdfBlocks path
+            return result |> Result.map (String.concat "\n\n")
+        }
+
+    let chunkBlocks size overlap (blocks: string list) =
+        let rec loop remaining currentChunk currentLen chunks =
+            match remaining with
+            | [] -> 
+                if List.isEmpty currentChunk then chunks
+                else (List.rev currentChunk |> String.concat "\n\n") :: chunks
+            | (block: string) :: rest ->
+                let blockLen = block.Length
+                
+                if blockLen > size && List.isEmpty currentChunk then
+                    // Block is too big, let FsColbert string chunker handle it later or just emit it
+                    // Emitting as is, we will apply string chunker on oversized blocks in loadChunks
+                    loop rest [] 0 (block :: chunks)
+                elif currentLen + blockLen + 2 > size && not (List.isEmpty currentChunk) then
+                    let chunkText = List.rev currentChunk |> String.concat "\n\n"
+                    
+                    let rec getOverlap acc accLen revChunk =
+                        match revChunk with
+                        | [] -> acc
+                        | (b: string) :: bs ->
+                            if List.length acc = List.length currentChunk - 1 then acc
+                            elif accLen + b.Length + 2 > overlap && not (List.isEmpty acc) then acc
+                            else getOverlap (b :: acc) (accLen + b.Length + 2) bs
+                            
+                    let overlapBlocks = getOverlap [] 0 currentChunk
+                    let overlapLen = overlapBlocks |> List.sumBy (fun (x:string) -> x.Length) |> (+) (if overlapBlocks.Length > 0 then (overlapBlocks.Length - 1) * 2 else 0)
+                    
+                    loop remaining overlapBlocks overlapLen (chunkText :: chunks)
+                else
+                    loop rest (block :: currentChunk) (currentLen + blockLen + 2) chunks
+
+        loop blocks [] 0 []
+        |> List.rev
 
     let chunkText size overlap (text: string) =
         let options =
@@ -97,7 +146,7 @@ module KnowledgeSources =
                     async {
                         let! result =
                             match source.kind with
-                            | Pdf -> readPdfText source.location
+                            | Pdf -> readPdfBlocks source.location
 
                         return source, result
                     })
@@ -108,14 +157,28 @@ module KnowledgeSources =
 
             for source, result in loaded do
                 match result with
-                | Ok text ->
-                    for index, snip in chunkText 1800 250 text do
-                        chunks.Add(
-                            { source = source
-                              index = index
-                              text = snip
-                              score = 0.0f }
-                        )
+                | Ok blocks ->
+                    let structuralChunks = chunkBlocks 1800 250 blocks
+                    let mutable chunkIndex = 0
+                    for sChunk in structuralChunks do
+                        // If a single structural chunk is still > 1800 (giant block), fall back to char slicing
+                        if sChunk.Length > 1800 then
+                            for _, snip in chunkText 1800 250 sChunk do
+                                chunks.Add(
+                                    { source = source
+                                      index = chunkIndex
+                                      text = snip
+                                      score = 0.0f }
+                                )
+                                chunkIndex <- chunkIndex + 1
+                        else
+                            chunks.Add(
+                                { source = source
+                                  index = chunkIndex
+                                  text = sChunk
+                                  score = 0.0f }
+                            )
+                            chunkIndex <- chunkIndex + 1
                 | Error err -> errors.Add err
 
             return List.ofSeq chunks, List.ofSeq errors
@@ -410,30 +473,55 @@ module KnowledgeSources =
             return index
         }
 
-    let indexSource report (source: KnowledgeSource) =
+    let private buildIndexFromChunks report encoder (passages: FsColbert.PassageRef list) path =
+        async {
+            let mutable lastReported = -1
+
+            let progress (update: FsColbert.IndexProgress) =
+                if update.totalPassages > 0 then
+                    let completed = update.completedPassages
+
+                    if
+                        completed = 0
+                        || completed = update.totalPassages
+                        || completed - lastReported >= 10
+                    then
+                        lastReported <- completed
+                        report $"FsColbert indexed {completed}/{update.totalPassages} passage(s)."
+
+            let! index = FsColbert.IndexBuilder.createFromPassages encoder FsColbert.ChunkOptions.fsKameDefaults passages (Some progress)
+            FsColbert.IndexPersistence.save path index
+            return index
+        }
+
+    let private chunksToPassages (source: KnowledgeSource) (blocks: string list) : FsColbert.PassageRef list =
+        let structuralChunks = chunkBlocks 1800 250 blocks
+        structuralChunks
+        |> List.mapi (fun index text ->
+            { FsColbert.PassageRef.sourceId = source.location
+              sourceDisplayName = source.DisplayName
+              sourceLocation = source.location
+              index = index
+              text = text })
+
+    let InindexSource report (source: KnowledgeSource) =
         async {
             let path = sourceIndexPath source
 
             match tryLoadPersistedIndex path with
             | Ok(Some _) -> () // already indexed
             | _ ->
-                let! result = readPdfText source.location
+                let! result = readPdfBlocks source.location
 
                 match result with
                 | Error _ -> ()
-                | Ok text ->
-                    let doc =
-                        FsColbert.SourceDocuments.create
-                            source.location
-                            source.DisplayName
-                            source.location
-                            text
-                            source.enabled
+                | Ok blocks ->
+                    let passages = chunksToPassages source blocks
 
                     report $"Preparing FsColbert model for {source.DisplayName}."
                     let! encoder = loadEncoder ()
                     report $"Building FsColbert index for {source.DisplayName}."
-                    let! _ = buildIndex report encoder [ doc ] path
+                    let! _ = buildIndexFromChunks report encoder passages path
                     ()
         }
 
@@ -456,20 +544,13 @@ module KnowledgeSources =
                     | Ok None ->
                         // If not found, we should build it, but normally it should have been built during processing
                         report $"Building missing FsColbert index for {source.DisplayName}."
-                        let! result = readPdfText source.location
+                        let! result = readPdfBlocks source.location
 
                         match result with
                         | Error err -> errors.Add err
-                        | Ok text ->
-                            let doc =
-                                FsColbert.SourceDocuments.create
-                                    source.location
-                                    source.DisplayName
-                                    source.location
-                                    text
-                                    source.enabled
-
-                            let! index = buildIndex report encoder [ doc ] path
+                        | Ok blocks ->
+                            let passages = chunksToPassages source blocks
+                            let! index = buildIndexFromChunks report encoder passages path
                             indices.Add(source, index)
                     | Error err -> errors.Add err
 

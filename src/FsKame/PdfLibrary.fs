@@ -62,13 +62,14 @@ module PdfLibrary =
 
     let processPdf report (doc: PdfDocumentSource) =
         async {
-            let! result = KnowledgeSources.readPdfText doc.storedPath
+            let! result = KnowledgeSources.readPdfBlocks doc.storedPath
 
             match result with
-            | Ok text ->
+            | Ok blocks ->
                 let source = { kind = Pdf; location = doc.storedPath; enabled = true }
-                do! KnowledgeSources.indexSource report source
-                let chunkCount = KnowledgeSources.chunkText 1800 250 text |> List.length
+                do! KnowledgeSources.InindexSource report source
+                let structuralChunks = KnowledgeSources.chunkBlocks 1800 250 blocks
+                let chunkCount = structuralChunks.Length
 
                 return
                     { id = doc.id
