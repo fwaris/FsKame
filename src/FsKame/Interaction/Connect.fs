@@ -36,6 +36,7 @@ module Connect =
                                 parms.sources
                                 parms.logExpansions
                                 parms.logChunks
+                                parms.useLexicalFilter
 
                         flow.PostToFlow Fl_Start
 

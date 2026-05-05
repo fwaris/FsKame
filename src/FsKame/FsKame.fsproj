@@ -44,6 +44,7 @@
     <RunAOTCompilation>false</RunAOTCompilation>
     <CodesignKey>-</CodesignKey>
     <CodesignExtraArgs>--deep</CodesignExtraArgs>
+    <CodesignEntitlements Condition="'$(TargetPlatformIdentifier)' == 'maccatalyst'">Platforms/MacCatalyst/Entitlements.plist</CodesignEntitlements>
   </PropertyGroup>
 
   <ItemGroup>
@@ -142,6 +143,7 @@
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />
     <PackageReference Include="RTFlow" />
+    <PackageReference Include="System.Text.Json" />
   </ItemGroup>
 
   <ItemGroup>
@@ -157,4 +159,8 @@
   </ItemGroup>
   
   
+  <Target Name="ForceCodesign" AfterTargets="_CodesignAppBundle" Condition="'$(TargetPlatformIdentifier)' == 'maccatalyst' and '$(Configuration)' == 'Debug'">
+    <Exec Command="codesign -f -s - --deep &quot;$(_AppBundlePath)&quot;" />
+  </Target>
+
 </Project>

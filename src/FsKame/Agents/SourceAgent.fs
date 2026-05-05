@@ -12,7 +12,8 @@ module SourceAgent =
           retrievalMode: RetrievalMode
           retrieval: KnowledgeSources.RetrievalIndex
           logExpansions: bool
-          logChunks: bool }
+          logChunks: bool
+          useLexicalFilter: bool }
 
     let private loadSources (st: State) mode (sources: KnowledgeSource list) =
         async {
@@ -43,11 +44,15 @@ module SourceAgent =
         async {
             match msg with
             | Ag_SourcesUpdated(mode, sources, flags) -> 
-                let st = { st with logExpansions = flags.logExpansions; logChunks = flags.logChunks }
+                let st = 
+                    { st with 
+                        logExpansions = flags.logExpansions
+                        logChunks = flags.logChunks
+                        useLexicalFilter = flags.useLexicalFilter }
                 return! loadSources st mode sources
             | Ag_TranscriptUpdated snapshot when snapshot.isFinal ->
                 let report msg = st.bus.PostToAgent(Ag_Log msg)
-                let! context = KnowledgeSources.rank st.apiKey st.logExpansions st.logChunks report snapshot.text 6 st.retrieval
+                let! context = KnowledgeSources.rank st.apiKey st.logExpansions st.logChunks st.useLexicalFilter report snapshot.text 6 st.retrieval
                 st.bus.PostToAgent(Ag_ContextReady(snapshot, context, st.retrieval.sources))
                 return st
             | Ag_FlowDone _ ->
@@ -63,6 +68,7 @@ module SourceAgent =
               retrievalMode = FsColbertWithFallback
               retrieval = KnowledgeSources.emptyIndex
               logExpansions = false
-              logChunks = false }
+              logChunks = false
+              useLexicalFilter = true }
 
         bus.AgentBus.RunAsync("source", st0, update) |> FlowUtils.catch bus.PostToFlow

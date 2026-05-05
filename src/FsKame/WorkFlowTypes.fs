@@ -45,7 +45,7 @@ type FlowMsg =
 type AgentMsg =
     | Ag_FlowError of WErrorType
     | Ag_FlowDone of {| abnormal: bool |}
-    | Ag_SourcesUpdated of RetrievalMode * KnowledgeSource list * {| logExpansions: bool; logChunks: bool |}
+    | Ag_SourcesUpdated of RetrievalMode * KnowledgeSource list * {| logExpansions: bool; logChunks: bool; useLexicalFilter: bool |}
     | Ag_TranscriptUpdated of TranscriptSnapshot
     | Ag_ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
     | Ag_ResponseReady of TranscriptSnapshot * OracleCandidate option

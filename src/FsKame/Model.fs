@@ -20,7 +20,8 @@ type StartParams =
       sources: KnowledgeSource list
       mailbox: Channel<Msg>
       logExpansions: bool
-      logChunks: bool }
+      logChunks: bool
+      useLexicalFilter: bool }
 
 and Model =
     { currentPage: AppPage
@@ -35,7 +36,8 @@ and Model =
       hideSecrets: bool
       isBusy: bool
       logExpansions: bool
-      logChunks: bool }
+      logChunks: bool
+      useLexicalFilter: bool }
 
 and Msg =
     | OpenAiKeyChanged of string
@@ -61,3 +63,4 @@ and Msg =
     | EventError of exn
     | LogExpansionsToggled of bool
     | LogChunksToggled of bool
+    | UseLexicalFilterToggled of bool

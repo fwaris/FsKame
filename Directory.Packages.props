@@ -24,6 +24,7 @@
     <PackageVersion Include="Microsoft.ML.OnnxRuntime.Extensions" Version="0.15.2-dev-20251214-1129-7387a4eb" />
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="System.Text.Json" Version="10.0.7" />
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
     <PackageVersion Include="OpenAI" Version="2.10.0" />

@@ -77,16 +77,12 @@ module SettingsView =
                 .gridColumn(1)
                 .centerVertical ()
 
-            ViewControls.formLabel "Status" 5
+            ViewControls.formLabel "Lexical Filter" 5
 
-            Label(Update.statusText model)
-                .textColor(Update.statusColor model)
-                .font(size = 13., attributes = FontAttributes.Bold)
-                .centerVertical()
+            Switch(model.useLexicalFilter, UseLexicalFilterToggled)
                 .gridRow(5)
                 .gridColumn(1)
-                .gridColumnSpan(2)
-                .margin (2.)
+                .centerVertical ()
         }
 
     let contentPage (model: Model) =
@@ -97,9 +93,6 @@ module SettingsView =
 
                     settingsForm model
 
-                    HStack(spacing = 8.) {
-                        (ViewControls.compactIconButton Icons.save ApplySources).isEnabled (not model.isBusy)
-                    }
                 })
                     .padding (18.)
             )

@@ -15,7 +15,8 @@ module StateMachine =
           conn: RTOpenAI.Api.Connection
           sources: KnowledgeSource list
           logExpansions: bool
-          logChunks: bool }
+          logChunks: bool
+          useLexicalFilter: bool }
 
     let private startAgents ss =
         async {
@@ -42,7 +43,10 @@ module StateMachine =
             | W_Err err -> return F(s_terminate ss, [ Ag_FlowError err; Ag_FlowDone {| abnormal = true |} ])
             | W_Msg Fl_Start ->
                 do! startAgents ss
-                let flags = {| logExpansions = ss.logExpansions; logChunks = ss.logChunks |}
+                let flags = 
+                    {| logExpansions = ss.logExpansions
+                       logChunks = ss.logChunks
+                       useLexicalFilter = ss.useLexicalFilter |}
                 return F(s_run ss, [ Ag_SourcesUpdated(ss.retrievalMode, ss.sources, flags) ])
             | W_Msg(Fl_Terminate x) -> return terminate x.abnormal ss
         }
@@ -57,7 +61,7 @@ module StateMachine =
 
     and private s_terminate ss _ = async { return F(s_terminate ss, []) }
 
-    let create mailbox apiKey oracleModel retrievalMode conn sources logExpansions logChunks =
+    let create mailbox apiKey oracleModel retrievalMode conn sources logExpansions logChunks useLexicalFilter =
         let bus = WBus<FlowMsg, AgentMsg>.Create()
 
         let ss =
@@ -69,7 +73,8 @@ module StateMachine =
               conn = conn
               sources = sources
               logExpansions = logExpansions
-              logChunks = logChunks }
+              logChunks = logChunks
+              useLexicalFilter = useLexicalFilter }
 
         RTFlow.Workflow.run CancellationToken.None bus (s_start ss)
 

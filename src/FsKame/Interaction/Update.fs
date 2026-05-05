@@ -21,13 +21,15 @@ module Update =
         Settings.setPdfLibrary model.pdfDocuments
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
+        Settings.setUseLexicalFilter model.useLexicalFilter
 
     let private postSources model =
         match model.bundle with
         | Some bundle ->
             let flags =
                 {| logExpansions = model.logExpansions
-                   logChunks = model.logChunks |}
+                   logChunks = model.logChunks
+                   useLexicalFilter = model.useLexicalFilter |}
 
             bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model, flags))
         | None -> ()
@@ -111,7 +113,8 @@ module Update =
           sources = sources model
           mailbox = model.mailbox
           logExpansions = model.logExpansions
-          logChunks = model.logChunks }
+          logChunks = model.logChunks
+          useLexicalFilter = model.useLexicalFilter }
 
     let init () =
         { currentPage = Main
@@ -126,7 +129,8 @@ module Update =
           hideSecrets = true
           isBusy = false
           logExpansions = Settings.logExpansions ()
-          logChunks = Settings.logChunks () },
+          logChunks = Settings.logChunks ()
+          useLexicalFilter = Settings.useLexicalFilter () },
         Cmd.none
 
     let update msg model =
@@ -141,6 +145,11 @@ module Update =
             model, Cmd.none
         | LogChunksToggled value ->
             let model = { model with logChunks = value }
+            saveSettings model
+            postSources model
+            model, Cmd.none
+        | UseLexicalFilterToggled value ->
+            let model = { model with useLexicalFilter = value }
             saveSettings model
             postSources model
             model, Cmd.none

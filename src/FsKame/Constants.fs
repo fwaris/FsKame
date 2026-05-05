@@ -7,10 +7,11 @@ module C =
     let SETTINGS_RETRIEVAL_MODE = "FsKame.RetrievalMode"
     let SETTINGS_LOG_EXPANSIONS = "FsKame.LogExpansions"
     let SETTINGS_LOG_CHUNKS = "FsKame.LogChunks"
+    let SETTINGS_USE_LEXICAL_FILTER = "FsKame.UseLexicalFilter"
 
     let DEFAULT_ORACLE_MODEL = "gpt-5.1"
     let DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
-    let NANO_MODEL = "gpt-5.4-nano"
+    let NANO_MODEL = "gpt-5.4-mini" // "gpt-5.4-nano"
     let MAX_LOG = 250
     let FONT_REG = "OpenSansRegular"
     let FONT_BOLD = "OpenSansSemibold"

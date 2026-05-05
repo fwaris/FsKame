@@ -113,3 +113,9 @@ module Settings =
 
     let setLogChunks value =
         Preferences.Default.Set(C.SETTINGS_LOG_CHUNKS, value)
+
+    let useLexicalFilter () =
+        Preferences.Default.Get(C.SETTINGS_USE_LEXICAL_FILTER, true)
+
+    let setUseLexicalFilter value =
+        Preferences.Default.Set(C.SETTINGS_USE_LEXICAL_FILTER, value)

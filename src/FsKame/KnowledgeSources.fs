@@ -4,6 +4,7 @@ open System
 open System.IO
 open System.Net.Http
 open System.Security.Cryptography
+open System.Text.Json.Serialization
 open Microsoft.Extensions.AI
 open System.Text
 open FsKame
@@ -25,8 +26,13 @@ module KnowledgeSources =
           chunks = []
           colbertIndices = []
           encoder = None }
-        
-    type Expansion = {terms: string list}
+            
+    [<JsonConverter(typeof<JsonStringEnumConverter>)>]
+    [<RequireQualifiedAccess>]
+    type QueryType =        
+        | Question = 1
+        | SectionRetrieval = 2           
+    type Expansion = {terms: string list; queryType:QueryType}
 
     let mutable private cachedEncoder: FsColbert.OnnxColbertEncoder option = None
 
@@ -234,45 +240,63 @@ module KnowledgeSources =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
 
-    let getSynonyms (client: IChatClient) (report: (string -> unit) option) query =
+    let getSynonyms (client: IChatClient) (report: (string -> unit) option) query : Async<Expansion option> =
         async {
             if String.IsNullOrWhiteSpace query then
-                return []
+                return None
             else
                 try
                     let prompt =
-                        $"List 5-10 synonyms, strongly related technical terms, and optionally antonyms for the primary concepts in the following query to improve search recall (especially for negated queries). Return only a space-separated list of terms, no other text.\n\nQuery: {query}"
+                        $"""
+List 2-3 synonyms, strongly related technical terms, and optionally antonyms for the primary concepts in the following query to improve search recall (especially for negated queries). Return only a space-separated list of terms.
+Also classify the query as type of 'Question' or SectionRetrieval.
+Note that operational commands like 'Can you summarize the <section>', etc. are not questions for which answer needs to be generated but are equivalent to 'summarize the <section>'. Distinguish between true questions and request to perform an operation.
 
+Query: {query}
+"""
                     let opts = ChatOptions()
                     opts.ResponseFormat <- ChatResponseFormat.ForJsonSchema<Expansion>()
                     let! response = client.GetResponseAsync<Expansion>(prompt, opts) |> Async.AwaitTask
-                    let terms = response.Result.terms                    
+                    let expansion = response.Result
                     report |> Option.iter (fun r -> 
-                        let keywords = String.concat ", " terms
-                        r $"Expanded query keywords: {keywords}")
+                        let keywords = String.concat ", " expansion.terms
+                        r $"Query type: {expansion.queryType}. Expanded keywords: {keywords}")
 
-                    return terms
+                    return Some expansion
                 with ex ->
                     report |> Option.iter (fun r -> r $"Query expansion failed: {ex.ToString()}")
-                    return []
+                    return None
         }
 
-    let rank (apiKey: string option) (logExpansions: bool) (logChunks: bool) (report: string -> unit) (query: string) (maxResults: int) (retrieval: RetrievalIndex) : Async<SourceChunk list> =
+    let private getSearchWeights = function
+        | QueryType.Question -> 1.0f, 0.1f
+        | QueryType.SectionRetrieval -> 0.1f, 1.0f
+        | _ -> 1.0f, 1.0f
+
+    let rank (apiKey: string option) (logExpansions: bool) (logChunks: bool) (useLexicalFilter: bool) (report: string -> unit) (query: string) (maxResults: int) (retrieval: RetrievalIndex) : Async<SourceChunk list> =
         async {
-            let! searchTerms =
-                match apiKey with
-                | Some key when not (String.IsNullOrWhiteSpace key) -> 
+            let! expansion =
+                match apiKey, useLexicalFilter with
+                | Some key, true when not (String.IsNullOrWhiteSpace key) -> 
                     use client = createChatClient key C.NANO_MODEL
                     let r = if logExpansions then Some report else None
                     getSynonyms client r query
-                | _ -> async { return [] }
+                | _ -> async { return None }
+
+            let searchTerms = expansion |> Option.map (fun e -> e.terms) |> Option.defaultValue []
+            let queryType = expansion |> Option.map (fun e -> e.queryType) |> Option.defaultValue QueryType.Question
 
             match retrieval.encoder, retrieval.colbertIndices with
             | Some encoder, indices when not (List.isEmpty indices) ->
                 try
+                    let denseWeight, lexicalWeight = getSearchWeights queryType
                     let options =
                         { FsColbert.SearchOptions.defaults with
-                            maxResults = maxResults }
+                            maxResults = maxResults
+                            useLexicalFilter = useLexicalFilter
+                            useRRF = true
+                            denseWeight = denseWeight
+                            lexicalWeight = lexicalWeight }
 
                     let! allHits =
                         indices
