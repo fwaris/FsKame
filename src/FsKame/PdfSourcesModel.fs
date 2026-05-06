@@ -1,5 +1,9 @@
 namespace FsKame
 
+type DocumentKind =
+    | PdfFile
+    | MarkdownFile
+
 type PdfProcessingStatus =
     | Queued
     | Processing
@@ -8,6 +12,7 @@ type PdfProcessingStatus =
 
 type PdfDocumentSource =
     { id: string
+      kind: DocumentKind
       displayName: string
       storedPath: string
       originalPath: string
@@ -59,6 +64,11 @@ module RetrievalModes =
     let displayName mode = labels |> List.item (toIndex mode)
 
 module PdfDocuments =
+    let kindLabel doc =
+        match doc.kind with
+        | PdfFile -> "PDF"
+        | MarkdownFile -> "Markdown"
+
     let isReady doc =
         match doc.status with
         | Ready -> true
@@ -73,5 +83,5 @@ module PdfDocuments =
         match doc.status with
         | Queued -> "Queued"
         | Processing -> "Processing..."
-        | Ready -> $"Ready - {doc.chunkCount} chunk(s)"
+        | Ready -> $"Ready - {doc.chunkCount} chunk(s) - {kindLabel doc}"
         | Failed -> defaultArg doc.error "Failed"

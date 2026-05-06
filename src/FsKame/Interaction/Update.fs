@@ -7,12 +7,24 @@ open FSharp.Control
 open Fabulous
 open FsKame.WorkFlow
 open Microsoft.Maui.ApplicationModel
+open Microsoft.Maui.Devices
 open Microsoft.Maui.Graphics
 open Microsoft.Maui.Storage
 
 module Update =
     let private sources model =
         KnowledgeSources.selectedSources model.pdfDocuments
+
+    let private documentFileTypes =
+        FilePickerFileType(
+            dict
+                [ DevicePlatform.iOS,
+                  [ "com.adobe.pdf"; "net.daringfireball.markdown"; "public.plain-text" ] :> seq<string>
+                  DevicePlatform.MacCatalyst,
+                  [ "com.adobe.pdf"; "net.daringfireball.markdown"; "public.plain-text" ] :> seq<string>
+                  DevicePlatform.Android, [ "application/pdf"; "text/markdown"; "text/plain" ] :> seq<string>
+                  DevicePlatform.WinUI, [ ".pdf"; ".md"; ".markdown" ] :> seq<string> ]
+        )
 
     let private saveSettings model =
         Settings.setOpenAiKey model.openAiKey
@@ -34,35 +46,35 @@ module Update =
             bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model, flags))
         | None -> ()
 
-    let private pickAndCopyPdfs existing =
+    let private pickAndCopyDocuments existing =
         async {
             try
                 let opts =
-                    PickOptions(PickerTitle = "Select PDFs", FileTypes = FilePickerFileType.Pdf)
+                    PickOptions(PickerTitle = "Select PDFs or Markdown files", FileTypes = documentFileTypes)
 
                 let tsk () =
                     FilePicker.Default.PickMultipleAsync(opts)
 
                 let! results = MainThread.InvokeOnMainThreadAsync<FileResult seq>(tsk) |> Async.AwaitTask
-                let! docs = PdfLibrary.copyNewPdfs existing results
+                let! docs = PdfLibrary.copyNewDocuments existing results
                 return Ok docs
             with ex ->
                 return Error ex
         }
 
-    let private processPdfs report (docs: PdfDocumentSource list) =
+    let private processDocuments report (docs: PdfDocumentSource list) =
         async {
             try
-                let! results = PdfLibrary.processPdfs report docs
+                let! results = PdfLibrary.processDocuments report docs
                 return Ok results
             with ex ->
                 return Error ex
         }
 
-    let private deletePdfAndIndexes (doc: PdfDocumentSource) =
+    let private deleteDocumentAndIndexes (doc: PdfDocumentSource) =
         async {
             try
-                let! removedFile = PdfLibrary.deleteStoredPdf doc
+                let! removedFile = PdfLibrary.deleteStoredDocument doc
                 let! removedIndexCount, indexErrors = KnowledgeSources.clearPersistedIndexes ()
 
                 return
@@ -163,15 +175,15 @@ module Update =
             Cmd.none
         | PickPdfs ->
             { model with isBusy = true },
-            Cmd.OfAsync.either pickAndCopyPdfs model.pdfDocuments PickPdfsCompleted EventError
+            Cmd.OfAsync.either pickAndCopyDocuments model.pdfDocuments PickPdfsCompleted EventError
         | PickPdfsCompleted(Ok docs) ->
             let pdfDocuments = model.pdfDocuments @ docs
 
             let msg =
                 if List.isEmpty docs then
-                    "No new PDFs selected."
+                    "No new documents selected."
                 else
-                    $"Processing {docs.Length} new PDF(s)."
+                    $"Processing {docs.Length} new document(s)."
 
             let log = msg :: model.log |> List.truncate C.MAX_LOG
 
@@ -186,12 +198,14 @@ module Update =
             if List.isEmpty docs then
                 model, Cmd.none
             else
-                let report msg = model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
-                model, Cmd.OfAsync.either (processPdfs report) docs PdfProcessingCompleted EventError
+                let report msg =
+                    model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+
+                model, Cmd.OfAsync.either (processDocuments report) docs PdfProcessingCompleted EventError
         | PickPdfsCompleted(Error ex) ->
             { model with
                 isBusy = false
-                log = $"PDF picker failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
+                log = $"Document picker failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
         | PdfProcessingCompleted(Ok results) ->
             let pdfDocuments =
@@ -202,7 +216,7 @@ module Update =
             let failedCount = results.Length - readyCount
 
             let log =
-                $"PDF processing complete: {readyCount} ready, {failedCount} failed."
+                $"Document processing complete: {readyCount} ready, {failedCount} failed."
                 :: model.log
                 |> List.truncate C.MAX_LOG
 
@@ -216,7 +230,9 @@ module Update =
             model, Cmd.none
         | PdfProcessingCompleted(Error ex) ->
             { model with
-                log = $"PDF processing failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
+                log =
+                    $"Document processing failed: {ex.Message}" :: model.log
+                    |> List.truncate C.MAX_LOG },
             Cmd.none
         | PdfSelectionChanged(id, selected) ->
             let pdfDocuments =
@@ -248,23 +264,26 @@ module Update =
                     { model with
                         pdfDocuments = retryDocs ids model.pdfDocuments }
 
-                let report msg = model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+                let report msg =
+                    model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+
                 Settings.setPdfLibrary model.pdfDocuments
-                model, Cmd.OfAsync.either (processPdfs report) retry PdfProcessingCompleted EventError
+                model, Cmd.OfAsync.either (processDocuments report) retry PdfProcessingCompleted EventError
         | DeletePdf id ->
             match model.pdfDocuments |> List.tryFind (fun doc -> doc.id = id) with
             | None -> model, Cmd.none
             | Some doc ->
-                { model with isBusy = true }, Cmd.OfAsync.either deletePdfAndIndexes doc DeletePdfCompleted EventError
+                { model with isBusy = true },
+                Cmd.OfAsync.either deleteDocumentAndIndexes doc DeletePdfCompleted EventError
         | DeletePdfCompleted(Ok result) ->
             let pdfDocuments =
                 model.pdfDocuments |> List.filter (fun doc -> doc.id <> result.id)
 
             let fileMsg =
                 if result.removedFile then
-                    $"Deleted PDF: {result.displayName}."
+                    $"Deleted document: {result.displayName}."
                 else
-                    $"Removed PDF library entry: {result.displayName}."
+                    $"Removed document library entry: {result.displayName}."
 
             let indexMsg =
                 if result.removedIndexCount = 0 then
@@ -288,7 +307,7 @@ module Update =
         | DeletePdfCompleted(Error ex) ->
             { model with
                 isBusy = false
-                log = $"PDF delete failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
+                log = $"Document delete failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
         | ApplySources ->
             saveSettings model
@@ -297,7 +316,9 @@ module Update =
             let count = sources model |> List.length
 
             { model with
-                log = $"Configured {count} PDF source(s)." :: model.log |> List.truncate C.MAX_LOG },
+                log =
+                    $"Configured {count} document source(s)." :: model.log
+                    |> List.truncate C.MAX_LOG },
             Cmd.none
         | StartStop ->
             match model.bundle with

@@ -7,7 +7,7 @@ open Microsoft.Maui.Storage
 
 module PdfLibrary =
     let private folder () =
-        let path = Path.Combine(FileSystem.AppDataDirectory, "FsKame", "Pdfs")
+        let path = Path.Combine(FileSystem.AppDataDirectory, "FsKame", "Documents")
         Directory.CreateDirectory(path) |> ignore
         path
 
@@ -17,6 +17,32 @@ module PdfLibrary =
         name.ToCharArray()
         |> Array.map (fun c -> if invalid.Contains c then '_' else c)
         |> String
+
+    let private kindFromFileName (fileName: string) =
+        match Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant() with
+        | "pdf" -> PdfFile
+        | "md"
+        | "markdown"
+        | "mdown"
+        | "mkdn" -> MarkdownFile
+        | _ -> MarkdownFile
+
+    let private sourceKind kind =
+        match kind with
+        | PdfFile -> Pdf
+        | MarkdownFile -> Markdown
+
+    let private readPassages (doc: PdfDocumentSource) =
+        let source =
+            FsColbert.PassageSource.create
+                doc.storedPath
+                $"{PdfDocuments.kindLabel doc}: {doc.displayName}"
+                doc.storedPath
+
+        match doc.kind with
+        | PdfFile -> FsColbert.PdfDocuments.readPassages FsColbert.ChunkOptions.fsKameDefaults source doc.storedPath
+        | MarkdownFile ->
+            FsColbert.MarkdownDocuments.readPassages FsColbert.ChunkOptions.fsKameDefaults source doc.storedPath
 
     let private hasExisting (docs: PdfDocumentSource list) originalPath fileName =
         docs
@@ -37,6 +63,7 @@ module PdfLibrary =
 
             return
                 { id = id
+                  kind = kindFromFileName fileName
                   displayName = fileName
                   storedPath = storedPath
                   originalPath = defaultArg (Text.notEmpty result.FullPath) result.FileName
@@ -46,7 +73,7 @@ module PdfLibrary =
                   error = None }
         }
 
-    let copyNewPdfs (existing: PdfDocumentSource list) (results: FileResult seq) =
+    let copyNewDocuments (existing: PdfDocumentSource list) (results: FileResult seq) =
         async {
             let candidates =
                 results
@@ -60,27 +87,22 @@ module PdfLibrary =
             return copied |> Array.toList
         }
 
-    let processPdf report (doc: PdfDocumentSource) =
+    let processDocument report (doc: PdfDocumentSource) =
         async {
-            let! result = FsColbert.PdfDocuments.readBlocks doc.storedPath
+            let! result = readPassages doc
 
             match result with
-            | Ok blocks ->
+            | Ok passages ->
                 let source =
-                    { kind = Pdf
+                    { kind = sourceKind doc.kind
                       location = doc.storedPath
                       enabled = true }
 
                 do! KnowledgeSources.InindexSource report source
 
-                let structuralChunks =
-                    FsColbert.DocumentChunking.chunkSectionedBlocks FsColbert.ChunkOptions.fsKameDefaults blocks
-
-                let chunkCount = structuralChunks.Length
-
                 return
                     { id = doc.id
-                      chunkCount = chunkCount
+                      chunkCount = passages.Length
                       error = None }
             | Error err ->
                 return
@@ -89,18 +111,18 @@ module PdfLibrary =
                       error = Some err }
         }
 
-    let processPdfs report docs =
+    let processDocuments report docs =
         async {
             let mutable results = []
 
             for doc in docs do
-                let! result = processPdf report doc
+                let! result = processDocument report doc
                 results <- result :: results
 
             return List.rev results
         }
 
-    let deleteStoredPdf (doc: PdfDocumentSource) =
+    let deleteStoredDocument (doc: PdfDocumentSource) =
         async {
             if String.IsNullOrWhiteSpace doc.storedPath || not (File.Exists doc.storedPath) then
                 return false

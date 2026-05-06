@@ -8,6 +8,7 @@ module Settings =
     [<CLIMutable>]
     type private PdfDocumentDto =
         { id: string
+          kind: string
           displayName: string
           storedPath: string
           originalPath: string
@@ -15,6 +16,17 @@ module Settings =
           status: string
           chunkCount: int
           error: string }
+
+    let private kindToString kind =
+        match kind with
+        | PdfFile -> "pdf"
+        | MarkdownFile -> "markdown"
+
+    let private kindFromString value =
+        match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
+        | "markdown"
+        | "md" -> MarkdownFile
+        | _ -> PdfFile
 
     let private statusToString (status: PdfProcessingStatus) =
         match status with
@@ -32,6 +44,7 @@ module Settings =
 
     let private toDto (doc: PdfDocumentSource) : PdfDocumentDto =
         { id = doc.id
+          kind = kindToString doc.kind
           displayName = doc.displayName
           storedPath = doc.storedPath
           originalPath = doc.originalPath
@@ -51,6 +64,7 @@ module Settings =
             | Failed -> Failed, false, Text.notEmpty dto.error
 
         { id = dto.id
+          kind = kindFromString dto.kind
           displayName = dto.displayName
           storedPath = dto.storedPath
           originalPath = dto.originalPath

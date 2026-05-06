@@ -41,6 +41,11 @@ module KnowledgeSources =
 
     let private pdfIndexVersion = FsColbert.DocumentChunking.representationVersion
 
+    let private sourceKindFromDocument kind =
+        match kind with
+        | PdfFile -> Pdf
+        | MarkdownFile -> Markdown
+
     let disposeIndex (retrieval: RetrievalIndex) =
         retrieval.encoder
         |> Option.iter (fun encoder ->
@@ -53,13 +58,21 @@ module KnowledgeSources =
         docs
         |> PdfDocuments.selectedReady
         |> List.map (fun doc ->
-            { kind = Pdf
+            { kind = sourceKindFromDocument doc.kind
               location = doc.storedPath
               enabled = true })
 
     let selectedSources (docs: PdfDocumentSource list) = fromPdfDocuments docs
 
     let private fsKameChunkOptions = FsColbert.ChunkOptions.fsKameDefaults
+
+    let private sourcePassages (source: KnowledgeSource) =
+        let passageSource =
+            FsColbert.PassageSource.create source.location source.DisplayName source.location
+
+        match source.kind with
+        | Pdf -> FsColbert.PdfDocuments.readPassages fsKameChunkOptions passageSource source.location
+        | Markdown -> FsColbert.MarkdownDocuments.readPassages fsKameChunkOptions passageSource source.location
 
     let loadChunks (sources: KnowledgeSource list) : Async<SourceChunk list * string list> =
         async {
@@ -68,10 +81,7 @@ module KnowledgeSources =
                 |> List.filter _.enabled
                 |> List.map (fun source ->
                     async {
-                        let! result =
-                            match source.kind with
-                            | Pdf -> FsColbert.PdfDocuments.readBlocks source.location
-
+                        let! result = sourcePassages source
                         return source, result
                     })
                 |> Async.Parallel
@@ -81,21 +91,14 @@ module KnowledgeSources =
 
             for source, result in loaded do
                 match result with
-                | Ok blocks ->
-                    let structuralChunks =
-                        FsColbert.DocumentChunking.chunkSectionedBlocks fsKameChunkOptions blocks
-
-                    let mutable chunkIndex = 0
-
-                    for sChunk in structuralChunks do
+                | Ok passages ->
+                    for passage in passages do
                         chunks.Add(
                             { source = source
-                              index = chunkIndex
-                              text = sChunk
+                              index = passage.index
+                              text = passage.text
                               score = 0.0f }
                         )
-
-                        chunkIndex <- chunkIndex + 1
                 | Error err -> errors.Add err
 
             return List.ofSeq chunks, List.ofSeq errors
@@ -104,6 +107,7 @@ module KnowledgeSources =
     let private sourceKindId sourceKind =
         match sourceKind with
         | Pdf -> "pdf"
+        | Markdown -> "markdown"
 
     let private sourceFromLocation (sources: KnowledgeSource list) (location: string) : KnowledgeSource =
         sources
@@ -616,12 +620,6 @@ Query: {query}
             return index
         }
 
-    let private passageSource (source: KnowledgeSource) =
-        FsColbert.PassageSource.create source.location source.DisplayName source.location
-
-    let private readPdfPassages (source: KnowledgeSource) =
-        FsColbert.PdfDocuments.readPassages fsKameChunkOptions (passageSource source) source.location
-
     let InindexSource report (source: KnowledgeSource) =
         async {
             let path = sourceIndexPath source
@@ -629,7 +627,7 @@ Query: {query}
             match tryLoadPersistedIndex path with
             | Ok(Some _) -> () // already indexed
             | _ ->
-                let! result = readPdfPassages source
+                let! result = sourcePassages source
 
                 match result with
                 | Error _ -> ()
@@ -660,7 +658,7 @@ Query: {query}
                     | Ok None ->
                         // If not found, we should build it, but normally it should have been built during processing
                         report $"Building missing FsColbert index for {source.DisplayName}."
-                        let! result = readPdfPassages source
+                        let! result = sourcePassages source
 
                         match result with
                         | Error err -> errors.Add err
@@ -684,7 +682,7 @@ Query: {query}
 
     let renderContext (chunks: SourceChunk list) =
         if List.isEmpty chunks then
-            "No selected PDF context was available."
+            "No selected document context was available."
         else
             chunks
             |> List.mapi (fun index (chunk: SourceChunk) ->
@@ -696,7 +694,7 @@ Query: {query}
         let enabled = sources |> List.filter _.enabled
 
         if List.isEmpty enabled then
-            "No PDF sources are currently selected and ready."
+            "No document sources are currently selected and ready."
         else
             enabled
             |> List.mapi (fun index source -> $"[{index + 1}] {source.DisplayName}")

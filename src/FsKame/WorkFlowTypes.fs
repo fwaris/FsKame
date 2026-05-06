@@ -4,7 +4,9 @@ open System
 open FsKame
 open RTFlow
 
-type SourceKind = | Pdf
+type SourceKind =
+    | Pdf
+    | Markdown
 
 type KnowledgeSource =
     { kind: SourceKind
@@ -14,6 +16,7 @@ type KnowledgeSource =
     member this.DisplayName =
         match this.kind with
         | Pdf -> $"PDF: {this.location}"
+        | Markdown -> $"Markdown: {this.location}"
 
 type SourceChunk =
     { source: KnowledgeSource
@@ -45,7 +48,12 @@ type FlowMsg =
 type AgentMsg =
     | Ag_FlowError of WErrorType
     | Ag_FlowDone of {| abnormal: bool |}
-    | Ag_SourcesUpdated of RetrievalMode * KnowledgeSource list * {| logExpansions: bool; logChunks: bool; useLexicalFilter: bool |}
+    | Ag_SourcesUpdated of
+        RetrievalMode *
+        KnowledgeSource list *
+        {| logExpansions: bool
+           logChunks: bool
+           useLexicalFilter: bool |}
     | Ag_TranscriptUpdated of TranscriptSnapshot
     | Ag_ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
     | Ag_ResponseReady of TranscriptSnapshot * OracleCandidate option

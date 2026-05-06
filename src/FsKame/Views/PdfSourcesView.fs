@@ -31,7 +31,7 @@ module PdfSourcesView =
 
     let private emptyView =
         Border(
-            Label("No PDFs added")
+            Label("No documents added")
                 .font(size = 13.)
                 .textColor(Colors.DimGray)
                 .centerHorizontal()
@@ -93,7 +93,10 @@ module PdfSourcesView =
     let view model =
         Border(
             (Grid([ Dimension.Star ], [ Dimension.Absolute 44.; Dimension.Star ]) {
-                Label("PDF Sources").font(size = 15., attributes = FontAttributes.Bold).centerVertical().gridRow (0)
+                Label("Document Sources")
+                    .font(size = 15., attributes = FontAttributes.Bold)
+                    .centerVertical()
+                    .gridRow (0)
 
                 if List.isEmpty model.pdfDocuments then
                     emptyView.gridRow (1)
