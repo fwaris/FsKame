@@ -14,6 +14,7 @@ module VoiceAgent =
           transcriptByItem: Map<string, string>
           revision: int
           respondedTurns: Set<string>
+          assistantSpeechStarted: bool
           bus: WBus<FlowMsg, AgentMsg> }
 
     let sessionAudio =
@@ -109,9 +110,20 @@ module VoiceAgent =
             | ServerEvent.SessionUpdated _ ->
                 st.bus.PostToAgent(Ag_Log "Realtime session updated.")
                 return st
+            | ServerEvent.OutputAudioBufferStarted _ ->
+                return
+                    { st with
+                        assistantSpeechStarted = true }
+            | ServerEvent.ResponseDone _
+            | ServerEvent.ResponseOutputAudioDone _ ->
+                return
+                    { st with
+                        assistantSpeechStarted = false }
             | ServerEvent.InputAudioBufferSpeechStarted _ ->
-                responseCancel conn
-                st.bus.PostToAgent(Ag_Log "User interrupted; cancelling response.")
+                if st.assistantSpeechStarted then
+                    responseCancel conn
+                    st.bus.PostToAgent(Ag_Log "User interrupted; cancelling response.")
+
                 return st
             | ServerEvent.ConversationItemInputAudioTranscriptionDelta ev ->
                 let previous =
@@ -154,6 +166,7 @@ module VoiceAgent =
                   transcriptByItem = Map.empty
                   revision = 0
                   respondedTurns = Set.empty
+                  assistantSpeechStarted = false
                   bus = bus }
 
             do!
@@ -172,7 +185,6 @@ module VoiceAgent =
                     | Some candidate -> oracleInstructions snapshot candidate
                     | None -> fallbackInstructions snapshot
 
-                responseCancel conn
                 responseCreate conn responseInstructions
                 st.bus.PostToAgent(Ag_Log "Realtime response requested.")
 
@@ -188,6 +200,7 @@ module VoiceAgent =
               transcriptByItem = Map.empty
               revision = 0
               respondedTurns = Set.empty
+              assistantSpeechStarted = false
               bus = bus }
 
         bus.AgentBus.RunAsync("voice-responder", st, updateResponder conn)
