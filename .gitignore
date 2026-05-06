@@ -6,3 +6,6 @@ obj/
 .idea/
 .fake
 temp/
+src/FsKame/build.log
+.gitignore
+src/FsKame/rebuild.log
