@@ -2,6 +2,7 @@ namespace FsKame.WorkFlow
 
 open System
 open FsKame
+open RTOpenAI.Events
 open RTFlow
 
 type SourceKind =
@@ -57,6 +58,7 @@ type AgentMsg =
     | Ag_TranscriptUpdated of TranscriptSnapshot
     | Ag_ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
     | Ag_ResponseReady of TranscriptSnapshot * OracleCandidate option
+    | Ag_VoiceServerEvent of ServerEvent
     | Ag_Log of string
 
     override this.ToString() =
@@ -67,4 +69,5 @@ type AgentMsg =
         | Ag_TranscriptUpdated _ -> "Ag_TranscriptUpdated"
         | Ag_ContextReady _ -> "Ag_ContextReady"
         | Ag_ResponseReady _ -> "Ag_ResponseReady"
+        | Ag_VoiceServerEvent _ -> "Ag_VoiceServerEvent"
         | Ag_Log _ -> "Ag_Log"

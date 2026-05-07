@@ -52,10 +52,17 @@ module Update =
         Settings.setOpenAiKey model.openAiKey
         Settings.setOracleModel model.oracleModel
         Settings.setRetrievalMode model.retrievalMode
-        Settings.setPdfLibrary model.pdfDocuments
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
         Settings.setUseLexicalFilter model.useLexicalFilter
+
+    let private savePdfLibraryWithLog docs log =
+        let saveLog =
+            match Settings.setPdfLibrary docs with
+            | Ok path -> $"Saved document library manifest: {docs.Length} document(s) at {path}."
+            | Error error -> $"Document library manifest was not saved: {error}"
+
+        saveLog :: log |> List.truncate C.MAX_LOG
 
     let private postSources model =
         match model.bundle with
@@ -268,7 +275,9 @@ module Update =
                     pdfDocuments = pdfDocuments
                     log = log }
 
-            Settings.setPdfLibrary model.pdfDocuments
+            let model =
+                { model with
+                    log = savePdfLibraryWithLog model.pdfDocuments model.log }
 
             if List.isEmpty docs then
                 { model with isBusy = false }, Cmd.none
@@ -301,7 +310,10 @@ module Update =
                     isBusy = false
                     log = log }
 
-            Settings.setPdfLibrary model.pdfDocuments
+            let model =
+                { model with
+                    log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
             postSources model
             model, Cmd.none
         | PdfProcessingCompleted(Error ex) ->
@@ -327,7 +339,10 @@ module Update =
                     { model with
                         pdfDocuments = pdfDocuments }
 
-                Settings.setPdfLibrary model.pdfDocuments
+                let model =
+                    { model with
+                        log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
                 postSources model
                 model, Cmd.none
         | RetryPdfProcessing id ->
@@ -354,7 +369,10 @@ module Update =
                     let report msg =
                         model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
 
-                    Settings.setPdfLibrary model.pdfDocuments
+                    let model =
+                        { model with
+                            log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
                     model, Cmd.OfAsync.either (processDocuments report) retry PdfProcessingCompleted EventError
         | DeletePdf id ->
             match documentMutationBlocked model "Deleting documents" with
@@ -394,7 +412,10 @@ module Update =
                     isBusy = false
                     log = log }
 
-            Settings.setPdfLibrary model.pdfDocuments
+            let model =
+                { model with
+                    log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
             postSources model
             model, Cmd.none
         | DeletePdfCompleted(Error ex) ->

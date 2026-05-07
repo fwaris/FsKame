@@ -42,9 +42,18 @@
     <UseInterpreter>true</UseInterpreter>
     <MtouchInterpreter>-all</MtouchInterpreter>
     <RunAOTCompilation>false</RunAOTCompilation>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'ios'">
+    <CodesignKey>Apple Development: Faisal Waris (VHX555Y865)</CodesignKey>
+    <CodesignProvision>Automatic</CodesignProvision>
+    <CodesignTeamId>M4R84H3397</CodesignTeamId>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'maccatalyst'">
     <CodesignKey>-</CodesignKey>
     <CodesignExtraArgs>--deep</CodesignExtraArgs>
-    <CodesignEntitlements Condition="'$(TargetPlatformIdentifier)' == 'maccatalyst'">Platforms/MacCatalyst/Entitlements.plist</CodesignEntitlements>
+    <CodesignEntitlements>Platforms/MacCatalyst/Entitlements.plist</CodesignEntitlements>
   </PropertyGroup>
 
   <ItemGroup>
@@ -61,6 +70,7 @@
     <Compile Include="PdfLibrary.fs" />
     <Compile Include="Agents\SourceAgent.fs" />
     <Compile Include="Agents\OracleAgent.fs" />
+    <Compile Include="Agents\AsyncPriorityQueue.fs" />
     <Compile Include="Agents\VoiceAgent.fs" />
     <Compile Include="Agents\AppAgent.fs" />
     <Compile Include="Agents\WorkFlow.fs" />
