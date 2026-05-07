@@ -1,7 +1,9 @@
 namespace FsKame.WorkFlow
 
 open System
+open System.Text.Json
 open System.Text.Json.Serialization
+open System.Threading.Tasks
 open FSharp.Control
 open RTOpenAI.Api
 open RTOpenAI.Events
@@ -9,7 +11,13 @@ open RTFlow
 open RTFlow.Functions
 
 module VoiceAgent =
-    type private Q = SendClientEvent of ClientEvent
+    module private ToolNames =
+        [<Literal>]
+        let QUERY_DOCUMENT_ORACLE = "QUERY_DOCUMENT_ORACLE"
+
+    type private Q =
+        | SendClientEvent of ClientEvent
+        | AwaitToolCall of VoiceToolCall
 
     type private UserSpeechState =
         | Silent
@@ -19,24 +27,24 @@ module VoiceAgent =
         | NoActiveResponse
         | ActiveResponse of {| id: string option |}
 
-    type private PendingResponse =
-        { turnId: string; instructions: string }
-
     type private VoiceState =
         { initialized: bool
           realtimeSession: Session
           transcriptByItem: Map<string, string>
           revision: int
-          respondedTurns: Set<string>
+          pendingToolCalls: Map<string, VoiceToolCall>
+          completedToolTurns: Set<string>
           userSpeechState: UserSpeechState
           responseCreatedState: ResponseCreatedState
           assistantSpeechStarted: bool
-          pendingResponses: PendingResponse list
+          pendingSpeakTexts: string list
           outputQueue: AsyncPriorityQueue<Q>
           bus: WBus<FlowMsg, AgentMsg> }
 
+    let private TOOL_CALL_PRIORITY = 0
     let private CONTROL_EVENT_PRIORITY = 10
     let private SPEAK_PRIORITY = 20
+    let private FUNCTION_CALL_TIMEOUT = TimeSpan.FromSeconds 45.
 
     let sessionAudio =
         { Audio.Default with
@@ -47,13 +55,59 @@ module VoiceAgent =
                             transcription =
                                 { language = "en"
                                   model = "gpt-4o-mini-transcribe"
-                                  prompt = Some "Expect natural question-answering conversation." }
+                                  prompt =
+                                    Some
+                                        "Expect natural question-answering conversation over selected PDF and Markdown documents." }
+                                |> Some
+                                |> Include
+                            turn_detection =
+                                VAD.Server_Vad
+                                    {| create_response = true
+                                       idle_timeout_ms = Skip
+                                       interrupt_response = true
+                                       prefix_padding_ms = 300
+                                       silence_duration_ms = 200
+                                       threshold = 0.5 |}
                                 |> Some
                                 |> Include }
                 ) }
 
     let private instructions =
-        "You are an assistant for answering user questions over documents. Your conversation with the user is relayed to a backend oracle. The oracle generates responses to user questions from the pdf documents as soon as the user is done speaking. Your job is convey these answers back to the user. Only answer from the information provided by the oracle. If you don't have the answer you may ask the user to wait allow the oracle to catch up. Don't make things up. Stay grounded. Keep answers conversational and brief: usually one to three short spoken sentences."
+        """You are FsKame's low-latency spoken front-end for document question answering.
+
+Allowed direct actions:
+- greet the user
+- handle short rapport, repetition, or simple clarification
+- ask a brief follow-up when the request is too vague to search safely
+- say a short preamble before a tool call, such as "Let me check the documents."
+
+Tool use:
+- For every substantive question, summary, comparison, or follow-up that needs information from selected PDFs or Markdown documents, call QUERY_DOCUMENT_ORACLE.
+- Pass the user's request as the `question` argument.
+- Do not answer document questions from your own knowledge.
+- Do not invent source details, page contents, citations, or facts.
+
+After QUERY_DOCUMENT_ORACLE returns:
+- Treat the tool result as the authoritative answer.
+- Speak the tool result naturally and briefly, without adding new facts.
+- If the tool says the documents do not contain the answer, say that plainly."""
+
+    let private documentOracleTool =
+        { Tool.Default with
+            name = ToolNames.QUERY_DOCUMENT_ORACLE
+            description =
+                "Use this to answer any user question that requires selected PDF or Markdown document content. The tool returns the exact grounded wording to speak."
+            parameters =
+                { Parameters.Default with
+                    properties =
+                        Map.ofList
+                            [ "question",
+                              JsProperty.String
+                                  { description =
+                                      Some
+                                          "The user's document question or follow-up, rewritten as a concise standalone request."
+                                    enum = None } ]
+                    required = [ "question" ] } }
 
     let private updateSession (session: Session) =
         { session with
@@ -62,8 +116,8 @@ module VoiceAgent =
             model = Some FsKame.C.DEFAULT_REALTIME_MODEL
             audio = Include(Some sessionAudio)
             instructions = Some instructions
-            tool_choice = Include(Some "none")
-            tools = Include(Some [])
+            tool_choice = Include(Some "auto")
+            tools = Include(Some [ documentOracleTool ])
             expires_at = Skip }
 
     let private enqueueOutbound (outputQueue: AsyncPriorityQueue<Q>) priority work = outputQueue.Enqueue(work, priority)
@@ -95,73 +149,181 @@ module VoiceAgent =
             event_id = Utils.newId () }
         |> ClientEvent.ResponseCancel
 
-    let private fallbackInstructions (snapshot: TranscriptSnapshot) =
-        $"{instructions}\n\nThe user just said:\n{snapshot.text}\n\nNo backend document guidance is available. Say briefly that you cannot answer from the selected documents right now."
+    let private createFunctionOutputEvent (result: ContentFunctionCallOutput) =
+        { ConversationItemCreate.Default with
+            event_id = Utils.newId ()
+            item = ConversationItem.Function_call_output result }
+        |> ClientEvent.ConversationItemCreate
 
-    let private oracleInstructions (snapshot: TranscriptSnapshot) (candidate: OracleCandidate) =
-        let contextNote =
-            if List.isEmpty candidate.context then
-                "No selected PDF chunk matched this question. Do not add outside knowledge."
-            else
-                candidate.context
-                |> List.map (fun c -> c.source.DisplayName)
-                |> List.distinct
-                |> String.concat "; "
-                |> sprintf "Relevant selected PDF source(s): %s"
+    let private fallbackToolOutput (snapshot: TranscriptSnapshot) =
+        $"I cannot answer that from the selected documents right now. The user asked: {snapshot.text}"
 
-        $"{instructions}\n\nThe user just said:\n{snapshot.text}\n\nBackend oracle guidance:\n{candidate.answer}\n\n{contextNote}\n\nSay the guided answer naturally. Do not add facts that are not in the selected PDFs."
+    let private oracleToolOutput (_snapshot: TranscriptSnapshot) (candidate: OracleCandidate) =
+        candidate.answer |> FsKame.Text.normalizeWhitespace
 
-    let private publishTranscript st itemId text isFinal =
+    let private makeTranscriptSnapshot st itemId text isFinal =
         let revision = st.revision + 1
 
-        let snapshot =
-            { turnId = itemId
-              itemId = itemId
-              revision = revision
-              text = text
-              isFinal = isFinal
-              receivedAt = DateTimeOffset.UtcNow }
-
-        st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
-        { st with revision = revision }
+        revision,
+        { turnId = itemId
+          itemId = itemId
+          revision = revision
+          text = text
+          isFinal = isFinal
+          receivedAt = DateTimeOffset.UtcNow }
 
     let private isResponseActive =
         function
         | ActiveResponse _ -> true
         | NoActiveResponse -> false
 
-    let private tryScheduleResponse (st: VoiceState) =
-        match st.userSpeechState, st.responseCreatedState, st.pendingResponses with
-        | Silent, NoActiveResponse, pending :: remaining ->
-            responseCreateEvent pending.instructions
+    let private speakToolResultInstructions text =
+        $"The document oracle tool returned this grounded answer. Speak it to the user naturally and briefly. Do not add facts or reinterpret it.\n\n{text}"
+
+    let private tryScheduleSpeak (st: VoiceState) =
+        match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
+        | Silent, NoActiveResponse, text :: remaining ->
+            responseCreateEvent (speakToolResultInstructions text)
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
-            st.bus.PostToAgent(Ag_Log $"Realtime response requested for turn {pending.turnId}.")
+            st.bus.PostToAgent(Ag_Log "Realtime response requested from document oracle tool output.")
 
             { st with
                 responseCreatedState = ActiveResponse {| id = None |}
-                pendingResponses = remaining }
+                pendingSpeakTexts = remaining }
         | _ -> st
 
-    let private queueResponse (st: VoiceState) (snapshot: TranscriptSnapshot) (candidate: OracleCandidate option) =
-        if st.respondedTurns.Contains snapshot.turnId then
-            st
-        else
-            let responseInstructions =
-                match candidate with
-                | Some candidate -> oracleInstructions snapshot candidate
-                | None -> fallbackInstructions snapshot
+    let private toolQuestion (content: string) =
+        let content =
+            content
+            |> Option.ofObj
+            |> Option.map (fun value -> value.Trim())
+            |> Option.defaultValue ""
 
-            st.bus.PostToAgent(Ag_Log $"Realtime response queued for turn {snapshot.turnId}.")
+        if String.IsNullOrWhiteSpace content then
+            ""
+        else
+            try
+                use doc = JsonDocument.Parse(content)
+                let mutable prop = Unchecked.defaultof<JsonElement>
+
+                if
+                    doc.RootElement.TryGetProperty("question", &prop)
+                    && prop.ValueKind = JsonValueKind.String
+                then
+                    prop.GetString()
+                    |> Option.ofObj
+                    |> Option.defaultValue ""
+                    |> FsKame.Text.normalizeWhitespace
+                else
+                    content
+            with _ ->
+                content
+
+    let private dispatchToolCall (st: VoiceState) (fc: ContentFunctionCall) =
+        let question = toolQuestion fc.arguments
+
+        let question =
+            if String.IsNullOrWhiteSpace question then
+                "The user asked a document question, but the tool call did not include the question text."
+            else
+                question
+
+        match fc.name with
+        | ToolNames.QUERY_DOCUMENT_ORACLE ->
+            let revision, snapshot = makeTranscriptSnapshot st fc.call_id question true
+
+            let call =
+                { name = fc.name
+                  callId = fc.call_id
+                  content = fc.arguments
+                  snapshot = snapshot
+                  task =
+                    TaskCompletionSource<ContentFunctionCallOutput>(TaskCreationOptions.RunContinuationsAsynchronously) }
+
+            enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY (AwaitToolCall call)
+            st.bus.PostToAgent(Ag_Log $"Document oracle tool call started: {question}")
+            st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
 
             { st with
-                respondedTurns = st.respondedTurns.Add snapshot.turnId
-                pendingResponses =
-                    st.pendingResponses
-                    @ [ { turnId = snapshot.turnId
-                          instructions = responseInstructions } ] }
-            |> tryScheduleResponse
+                revision = revision
+                pendingToolCalls = st.pendingToolCalls |> Map.add snapshot.turnId call }
+        | _ ->
+            let reply = $"The tool '{fc.name}' is not available in this FsKame session."
+            let result = ContentFunctionCallOutput.Create fc.call_id reply
+
+            createFunctionOutputEvent result
+            |> SendClientEvent
+            |> enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY
+
+            { st with
+                pendingSpeakTexts = st.pendingSpeakTexts @ [ reply ] }
+            |> tryScheduleSpeak
+
+    let private completeToolCall (st: VoiceState) (snapshot: TranscriptSnapshot) (candidate: OracleCandidate option) =
+        if st.completedToolTurns.Contains snapshot.turnId then
+            st
+        else
+            match st.pendingToolCalls |> Map.tryFind snapshot.turnId with
+            | None ->
+                st.bus.PostToAgent(
+                    Ag_Log $"Ignoring oracle response for turn without pending tool call: {snapshot.turnId}."
+                )
+
+                st
+            | Some call ->
+                let output =
+                    match candidate with
+                    | Some candidate -> oracleToolOutput snapshot candidate
+                    | None -> fallbackToolOutput snapshot
+
+                ContentFunctionCallOutput.Create call.callId output
+                |> call.task.TrySetResult
+                |> ignore
+
+                st.bus.PostToAgent(Ag_Log $"Document oracle tool call completed for turn {snapshot.turnId}.")
+
+                { st with
+                    pendingToolCalls = st.pendingToolCalls |> Map.remove snapshot.turnId
+                    completedToolTurns = st.completedToolTurns.Add snapshot.turnId }
+
+    let private removePendingToolCall callId (st: VoiceState) =
+        match
+            st.pendingToolCalls
+            |> Map.tryPick (fun turnId call -> if call.callId = callId then Some turnId else None)
+        with
+        | Some turnId ->
+            { st with
+                pendingToolCalls = st.pendingToolCalls |> Map.remove turnId
+                completedToolTurns = st.completedToolTurns.Add turnId }
+        | None -> st
+
+    let private handleToolOutputReady (st: VoiceState) callId output =
+        let st = removePendingToolCall callId st
+
+        if String.IsNullOrWhiteSpace output then
+            st
+        else
+            st.bus.PostToAgent(Ag_Log $"Document oracle tool output ready for call {callId}.")
+
+            { st with
+                pendingSpeakTexts = st.pendingSpeakTexts @ [ output ] }
+            |> tryScheduleSpeak
+
+    let private runAwaitedToolCall (bus: WBus<FlowMsg, AgentMsg>) conn (toolCall: VoiceToolCall) =
+        async {
+            try
+                let! result = toolCall.task.Task.WaitAsync(FUNCTION_CALL_TIMEOUT) |> Async.AwaitTask
+                createFunctionOutputEvent result |> sendClientEvent conn
+                bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, result.output))
+            with ex ->
+                let output = "The document oracle took too long to answer. Please try again."
+                let result = ContentFunctionCallOutput.Create toolCall.callId output
+                createFunctionOutputEvent result |> sendClientEvent conn
+                bus.PostToAgent(Ag_Log $"Document oracle tool call timed out for {toolCall.callId}: {ex.Message}")
+                bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, output))
+        }
 
     let private updateVoice (st: VoiceState) (ev: ServerEvent) =
         async {
@@ -190,12 +352,16 @@ module VoiceAgent =
                 return
                     { st with
                         assistantSpeechStarted = true }
+            | ServerEvent.ResponseOutputItemDone responseItem ->
+                match responseItem.item with
+                | Function_call fc -> return dispatchToolCall st fc
+                | _ -> return st
             | ServerEvent.ResponseDone _ ->
                 return
                     { st with
                         responseCreatedState = NoActiveResponse
                         assistantSpeechStarted = false }
-                    |> tryScheduleResponse
+                    |> tryScheduleSpeak
             | ServerEvent.ResponseOutputAudioDone _ ->
                 return
                     { st with
@@ -207,24 +373,26 @@ module VoiceAgent =
 
                 return { st with userSpeechState = Speaking }
             | ServerEvent.InputAudioBufferSpeechStopped _ ->
-                return { st with userSpeechState = Silent } |> tryScheduleResponse
+                return { st with userSpeechState = Silent } |> tryScheduleSpeak
             | ServerEvent.ConversationItemInputAudioTranscriptionDelta ev ->
                 let previous =
                     st.transcriptByItem |> Map.tryFind ev.item_id |> Option.defaultValue ""
 
                 let text = previous + ev.delta
-                let st = publishTranscript st ev.item_id text false
+                let revision, _ = makeTranscriptSnapshot st ev.item_id text false
 
                 return
                     { st with
+                        revision = revision
                         transcriptByItem = st.transcriptByItem |> Map.add ev.item_id text }
             | ServerEvent.ConversationItemInputAudioTranscriptionCompleted ev ->
                 let text = FsKame.Text.normalizeWhitespace ev.transcript
                 st.bus.PostToAgent(Ag_Log $"User: {text}")
-                let st = publishTranscript st ev.item_id text true
+                let revision, _ = makeTranscriptSnapshot st ev.item_id text true
 
                 return
                     { st with
+                        revision = revision
                         transcriptByItem = st.transcriptByItem |> Map.remove ev.item_id }
             | ServerEvent.Error e ->
                 st.bus.PostToAgent(Ag_Log $"Realtime API error: {e.error.message}")
@@ -239,7 +407,8 @@ module VoiceAgent =
         async {
             match msg with
             | Ag_VoiceServerEvent ev -> return! updateVoice st ev
-            | Ag_ResponseReady(snapshot, candidate) -> return queueResponse st snapshot candidate
+            | Ag_ResponseReady(snapshot, candidate) -> return completeToolCall st snapshot candidate
+            | Ag_ToolCallOutputReady(callId, output) -> return handleToolOutputReady st callId output
             | Ag_FlowDone _ ->
                 st.outputQueue.Complete()
                 return st
@@ -263,13 +432,16 @@ module VoiceAgent =
 
     let private startOutputPump conn (bus: WBus<FlowMsg, AgentMsg>) (outputQueue: AsyncPriorityQueue<Q>) =
         outputQueue.ToAsyncSeq()
-        |> AsyncSeq.iter (fun work ->
-            match work with
-            | SendClientEvent event ->
-                try
-                    sendClientEvent conn event
-                with ex ->
-                    bus.PostToAgent(Ag_Log $"Failed to send realtime client event: {ex.Message}"))
+        |> AsyncSeq.iterAsync (fun work ->
+            async {
+                match work with
+                | SendClientEvent event ->
+                    try
+                        sendClientEvent conn event
+                    with ex ->
+                        bus.PostToAgent(Ag_Log $"Failed to send realtime client event: {ex.Message}")
+                | AwaitToolCall toolCall -> do! runAwaitedToolCall bus conn toolCall
+            })
 
     let private startAgent outputQueue (bus: WBus<FlowMsg, AgentMsg>) =
         let st =
@@ -277,11 +449,12 @@ module VoiceAgent =
               realtimeSession = Session.Default
               transcriptByItem = Map.empty
               revision = 0
-              respondedTurns = Set.empty
+              pendingToolCalls = Map.empty
+              completedToolTurns = Set.empty
               userSpeechState = Silent
               responseCreatedState = NoActiveResponse
               assistantSpeechStarted = false
-              pendingResponses = []
+              pendingSpeakTexts = []
               outputQueue = outputQueue
               bus = bus }
 

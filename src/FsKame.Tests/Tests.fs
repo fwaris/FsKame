@@ -39,16 +39,16 @@ let private included name value =
 
 
 [<Fact>]
-let ``realtime session disables automatic VAD responses and interruptions`` () =
+let ``realtime session enables automatic VAD tool responses and interruptions`` () =
     let input = VoiceAgent.sessionAudio.input |> included "audio.input"
     let turnDetection = input.turn_detection |> included "audio.input.turn_detection"
 
     match turnDetection with
     | VAD.Server_Vad config ->
-        Assert.False(config.create_response)
-        Assert.False(config.interrupt_response)
+        Assert.True(config.create_response)
+        Assert.True(config.interrupt_response)
         Assert.Equal(300, config.prefix_padding_ms)
-        Assert.Equal(500, config.silence_duration_ms)
+        Assert.Equal(200, config.silence_duration_ms)
         Assert.Equal(0.5, config.threshold)
 
         match config.idle_timeout_ms with

@@ -12,6 +12,13 @@ open Microsoft.Maui.Graphics
 open Microsoft.Maui.Storage
 
 module Update =
+    let private minLogFontSize = 10.
+    let private maxLogFontSize = 22.
+    let private logFontStep = 1.
+
+    let private clampLogFontSize value =
+        min maxLogFontSize (max minLogFontSize value)
+
     let private sources model =
         KnowledgeSources.selectedSources model.pdfDocuments
 
@@ -167,6 +174,7 @@ module Update =
           retrievalMode = Settings.retrievalMode ()
           pdfDocuments = Settings.pdfLibrary ()
           log = [ "FsKame ready. Add PDFs, then connect." ]
+          logFontSize = 12.
           hideSecrets = true
           isBusy = false
           logExpansions = Settings.logExpansions ()
@@ -479,6 +487,14 @@ module Update =
                 log = text :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
         | Log_Clear -> { model with log = [] }, Cmd.none
+        | LogFont_Increase ->
+            { model with
+                logFontSize = clampLogFontSize (model.logFontSize + logFontStep) },
+            Cmd.none
+        | LogFont_Decrease ->
+            { model with
+                logFontSize = clampLogFontSize (model.logFontSize - logFontStep) },
+            Cmd.none
         | EventError ex ->
             { model with
                 isBusy = false

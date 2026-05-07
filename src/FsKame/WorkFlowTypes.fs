@@ -1,6 +1,7 @@
 namespace FsKame.WorkFlow
 
 open System
+open System.Threading.Tasks
 open FsKame
 open RTOpenAI.Events
 open RTFlow
@@ -42,6 +43,13 @@ type OracleCandidate =
       isFinal: bool
       createdAt: DateTimeOffset }
 
+type VoiceToolCall =
+    { name: string
+      callId: string
+      content: string
+      snapshot: TranscriptSnapshot
+      task: TaskCompletionSource<ContentFunctionCallOutput> }
+
 type FlowMsg =
     | Fl_Start
     | Fl_Terminate of {| abnormal: bool |}
@@ -59,6 +67,7 @@ type AgentMsg =
     | Ag_ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
     | Ag_ResponseReady of TranscriptSnapshot * OracleCandidate option
     | Ag_VoiceServerEvent of ServerEvent
+    | Ag_ToolCallOutputReady of string * string
     | Ag_Log of string
 
     override this.ToString() =
@@ -70,4 +79,5 @@ type AgentMsg =
         | Ag_ContextReady _ -> "Ag_ContextReady"
         | Ag_ResponseReady _ -> "Ag_ResponseReady"
         | Ag_VoiceServerEvent _ -> "Ag_VoiceServerEvent"
+        | Ag_ToolCallOutputReady _ -> "Ag_ToolCallOutputReady"
         | Ag_Log _ -> "Ag_Log"

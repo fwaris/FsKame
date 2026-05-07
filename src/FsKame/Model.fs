@@ -33,6 +33,7 @@ and Model =
       retrievalMode: RetrievalMode
       pdfDocuments: PdfDocumentSource list
       log: string list
+      logFontSize: float
       hideSecrets: bool
       isBusy: bool
       logExpansions: bool
@@ -60,6 +61,8 @@ and Msg =
     | WebRTC_StateChanged of RTOpenAI.WebRTC.State
     | Log_Append of string
     | Log_Clear
+    | LogFont_Increase
+    | LogFont_Decrease
     | EventError of exn
     | LogExpansionsToggled of bool
     | LogChunksToggled of bool
