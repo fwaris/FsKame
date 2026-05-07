@@ -8,6 +8,9 @@ open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module ToolbarView =
+    let private isRealtimeActive model =
+        model.bundle.IsSome || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+
     let private connectionColor model =
         match model.sessionState with
         | RTOpenAI.WebRTC.State.Connecting -> Colors.Orange
@@ -17,7 +20,7 @@ module ToolbarView =
     let main model =
         (Grid([ Dimension.Absolute 52.; Dimension.Star; Dimension.Absolute 52. ], [ Dimension.Absolute 50. ]) {
             (ViewControls.iconButton Icons.settings Settings_Show)
-                .isEnabled(not (model.sessionState = RTOpenAI.WebRTC.State.Connecting))
+                .isEnabled(not model.isBusy && not (isRealtimeActive model))
                 .alignStartHorizontal()
                 .gridColumn (0)
 

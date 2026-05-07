@@ -8,6 +8,12 @@ open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module PdfSourcesView =
+    let private isRealtimeActive model =
+        model.bundle.IsSome || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+
+    let private canMutateDocuments model =
+        not model.isBusy && not (isRealtimeActive model)
+
     let private addPdfButton model =
         Button("+", PickPdfs)
             .font(size = 28., attributes = FontAttributes.Bold)
@@ -17,7 +23,7 @@ module PdfSourcesView =
             .width(56.)
             .height(56.)
             .padding(0.)
-            .isEnabled(not model.isBusy)
+            .isEnabled(canMutateDocuments model)
             .alignEndHorizontal()
             .alignEndVertical()
             .margin (0., 0., 10., 10.)
@@ -42,7 +48,7 @@ module PdfSourcesView =
             .strokeThickness(1.)
             .strokeShape (RoundRectangle(CornerRadius(8.)))
 
-    let private row isBusy (doc: PdfDocumentSource) =
+    let private row canMutateDocuments (doc: PdfDocumentSource) =
         Border(
             (Grid(
                 [ Dimension.Absolute 42.
@@ -52,7 +58,7 @@ module PdfSourcesView =
                 [ Dimension.Absolute 28.; Dimension.Absolute 28. ]
             ) {
                 CheckBox(doc.selected, fun selected -> PdfSelectionChanged(doc.id, selected))
-                    .isEnabled(PdfDocuments.canSelect doc)
+                    .isEnabled(canMutateDocuments && PdfDocuments.canSelect doc)
                     .centerVertical()
                     .gridRowSpan(2)
                     .gridColumn (0)
@@ -74,12 +80,12 @@ module PdfSourcesView =
 
                 if doc.status = Failed then
                     (ViewControls.compactIconButton Icons.play (RetryPdfProcessing doc.id))
-                        .isEnabled(not isBusy)
+                        .isEnabled(canMutateDocuments)
                         .gridColumn(2)
                         .gridRowSpan (2)
 
                 (ViewControls.compactDangerIconButton Icons.delete (DeletePdf doc.id))
-                    .isEnabled(not isBusy)
+                    .isEnabled(canMutateDocuments)
                     .gridColumn(3)
                     .gridRowSpan (2)
             })
@@ -91,6 +97,8 @@ module PdfSourcesView =
             .margin (0., 0., 0., 6.)
 
     let view model =
+        let canMutateDocuments = canMutateDocuments model
+
         Border(
             (Grid([ Dimension.Star ], [ Dimension.Absolute 44.; Dimension.Star ]) {
                 Label("Document Sources")
@@ -101,7 +109,7 @@ module PdfSourcesView =
                 if List.isEmpty model.pdfDocuments then
                     emptyView.gridRow (1)
                 else
-                    (CollectionView (model.pdfDocuments) (row model.isBusy)).gridRow (1)
+                    (CollectionView (model.pdfDocuments) (row canMutateDocuments)).gridRow (1)
 
                 (addPdfButton model).gridRow (1)
             })

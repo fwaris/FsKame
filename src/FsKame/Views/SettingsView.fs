@@ -8,6 +8,12 @@ open Microsoft.Maui.Graphics
 open type Fabulous.Maui.View
 
 module SettingsView =
+    let private isRealtimeActive model =
+        model.bundle.IsSome || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+
+    let private canEditSettings model =
+        not model.isBusy && not (isRealtimeActive model)
+
     let private retrievalModeToggled enabled =
         if enabled then
             RetrievalModeChanged FsColbertWithFallback
@@ -15,6 +21,8 @@ module SettingsView =
             RetrievalModeChanged InternalDocumentIndex
 
     let private settingsForm model =
+        let canEditSettings = canEditSettings model
+
         Grid(
             [ Dimension.Absolute 112.; Dimension.Star; Dimension.Absolute 48. ],
             [ Dimension.Absolute 48.
@@ -29,6 +37,7 @@ module SettingsView =
             Entry(model.openAiKey, OpenAiKeyChanged)
                 .isPassword(model.hideSecrets)
                 .placeholder("OpenAI API key")
+                .isEnabled(canEditSettings)
                 .gridRow(0)
                 .gridColumn(1)
                 .margin (2.)
@@ -39,6 +48,7 @@ module SettingsView =
                  else
                      Icons.visibilityOff)
                 ToggleSecretVisibility)
+                .isEnabled(canEditSettings)
                 .gridRow(0)
                 .gridColumn (2)
 
@@ -46,6 +56,7 @@ module SettingsView =
 
             Entry(model.oracleModel, OracleModelChanged)
                 .placeholder("Oracle model")
+                .isEnabled(canEditSettings)
                 .gridRow(1)
                 .gridColumn(1)
                 .gridColumnSpan(2)
@@ -54,7 +65,9 @@ module SettingsView =
             ViewControls.formLabel "Retrieval" 2
 
             (HStack(spacing = 8.) {
-                Switch(model.retrievalMode = FsColbertWithFallback, retrievalModeToggled).centerVertical ()
+                Switch(model.retrievalMode = FsColbertWithFallback, retrievalModeToggled)
+                    .isEnabled(canEditSettings)
+                    .centerVertical ()
 
                 Label(RetrievalModes.displayName model.retrievalMode).font(size = 13.).centerVertical ()
             })
@@ -66,6 +79,7 @@ module SettingsView =
             ViewControls.formLabel "Log Expansions" 3
 
             Switch(model.logExpansions, LogExpansionsToggled)
+                .isEnabled(canEditSettings)
                 .gridRow(3)
                 .gridColumn(1)
                 .centerVertical ()
@@ -73,6 +87,7 @@ module SettingsView =
             ViewControls.formLabel "Log Chunks" 4
 
             Switch(model.logChunks, LogChunksToggled)
+                .isEnabled(canEditSettings)
                 .gridRow(4)
                 .gridColumn(1)
                 .centerVertical ()
@@ -80,6 +95,7 @@ module SettingsView =
             ViewControls.formLabel "Lexical Filter" 5
 
             Switch(model.useLexicalFilter, UseLexicalFilterToggled)
+                .isEnabled(canEditSettings)
                 .gridRow(5)
                 .gridColumn(1)
                 .centerVertical ()

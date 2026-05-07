@@ -15,6 +15,28 @@ module Update =
     let private sources model =
         KnowledgeSources.selectedSources model.pdfDocuments
 
+    let private isRealtimeActive model =
+        model.bundle.IsSome || model.sessionState <> RTOpenAI.WebRTC.State.Disconnected
+
+    let private canMutateDocuments model =
+        not model.isBusy && not (isRealtimeActive model)
+
+    let private documentMutationBlocked model action =
+        if model.isBusy then
+            Some $"{action} is unavailable while another operation is running."
+        elif isRealtimeActive model then
+            Some $"{action} is unavailable while realtime is connected."
+        else
+            None
+
+    let private sourceConfigBlocked model action =
+        if model.isBusy then
+            Some $"{action} is unavailable while another operation is running."
+        elif isRealtimeActive model then
+            Some $"{action} is unavailable while realtime is connected."
+        else
+            None
+
     let private documentFileTypes =
         FilePickerFileType(
             dict
@@ -147,35 +169,89 @@ module Update =
 
     let update msg model =
         match msg with
-        | OpenAiKeyChanged value -> { model with openAiKey = value }, Cmd.none
-        | OracleModelChanged value -> { model with oracleModel = value }, Cmd.none
-        | RetrievalModeChanged mode -> { model with retrievalMode = mode }, Cmd.none
+        | OpenAiKeyChanged value ->
+            match sourceConfigBlocked model "Changing OpenAI key" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None -> { model with openAiKey = value }, Cmd.none
+        | OracleModelChanged value ->
+            match sourceConfigBlocked model "Changing oracle model" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None -> { model with oracleModel = value }, Cmd.none
+        | RetrievalModeChanged mode ->
+            match sourceConfigBlocked model "Changing retrieval mode" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None -> { model with retrievalMode = mode }, Cmd.none
         | LogExpansionsToggled value ->
-            let model = { model with logExpansions = value }
-            saveSettings model
-            postSources model
-            model, Cmd.none
+            match sourceConfigBlocked model "Changing retrieval logging" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let model = { model with logExpansions = value }
+                saveSettings model
+                postSources model
+                model, Cmd.none
         | LogChunksToggled value ->
-            let model = { model with logChunks = value }
-            saveSettings model
-            postSources model
-            model, Cmd.none
+            match sourceConfigBlocked model "Changing chunk logging" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let model = { model with logChunks = value }
+                saveSettings model
+                postSources model
+                model, Cmd.none
         | UseLexicalFilterToggled value ->
-            let model = { model with useLexicalFilter = value }
-            saveSettings model
-            postSources model
-            model, Cmd.none
-        | Settings_Show -> { model with currentPage = Settings }, Cmd.none
+            match sourceConfigBlocked model "Changing lexical filter" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let model = { model with useLexicalFilter = value }
+                saveSettings model
+                postSources model
+                model, Cmd.none
+        | Settings_Show ->
+            match sourceConfigBlocked model "Opening settings" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None -> { model with currentPage = Settings }, Cmd.none
         | Settings_Close ->
             saveSettings model
             { model with currentPage = Main }, Cmd.none
         | ToggleSecretVisibility ->
-            { model with
-                hideSecrets = not model.hideSecrets },
-            Cmd.none
+            match sourceConfigBlocked model "Changing secret visibility" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                { model with
+                    hideSecrets = not model.hideSecrets },
+                Cmd.none
         | PickPdfs ->
-            { model with isBusy = true },
-            Cmd.OfAsync.either pickAndCopyDocuments model.pdfDocuments PickPdfsCompleted EventError
+            match documentMutationBlocked model "Adding documents" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                { model with isBusy = true },
+                Cmd.OfAsync.either pickAndCopyDocuments model.pdfDocuments PickPdfsCompleted EventError
         | PickPdfsCompleted(Ok docs) ->
             let pdfDocuments = model.pdfDocuments @ docs
 
@@ -190,13 +266,12 @@ module Update =
             let model =
                 { model with
                     pdfDocuments = pdfDocuments
-                    isBusy = false
                     log = log }
 
             Settings.setPdfLibrary model.pdfDocuments
 
             if List.isEmpty docs then
-                model, Cmd.none
+                { model with isBusy = false }, Cmd.none
             else
                 let report msg =
                     model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
@@ -223,6 +298,7 @@ module Update =
             let model =
                 { model with
                     pdfDocuments = pdfDocuments
+                    isBusy = false
                     log = log }
 
             Settings.setPdfLibrary model.pdfDocuments
@@ -230,51 +306,68 @@ module Update =
             model, Cmd.none
         | PdfProcessingCompleted(Error ex) ->
             { model with
+                isBusy = false
                 log =
                     $"Document processing failed: {ex.Message}" :: model.log
                     |> List.truncate C.MAX_LOG },
             Cmd.none
         | PdfSelectionChanged(id, selected) ->
-            let pdfDocuments =
-                model.pdfDocuments
-                |> List.map (fun doc ->
-                    if doc.id = id && PdfDocuments.canSelect doc then
-                        { doc with selected = selected }
-                    else
-                        doc)
-
-            let model =
-                { model with
-                    pdfDocuments = pdfDocuments }
-
-            Settings.setPdfLibrary model.pdfDocuments
-            postSources model
-            model, Cmd.none
-        | RetryPdfProcessing id ->
-            let retry =
-                model.pdfDocuments
-                |> List.filter (fun doc -> doc.id = id && doc.status = Failed)
-
-            if List.isEmpty retry then
+            if not (canMutateDocuments model) then
                 model, Cmd.none
             else
-                let ids = retry |> List.map _.id |> Set.ofList
+                let pdfDocuments =
+                    model.pdfDocuments
+                    |> List.map (fun doc ->
+                        if doc.id = id && PdfDocuments.canSelect doc then
+                            { doc with selected = selected }
+                        else
+                            doc)
 
                 let model =
                     { model with
-                        pdfDocuments = retryDocs ids model.pdfDocuments }
-
-                let report msg =
-                    model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+                        pdfDocuments = pdfDocuments }
 
                 Settings.setPdfLibrary model.pdfDocuments
-                model, Cmd.OfAsync.either (processDocuments report) retry PdfProcessingCompleted EventError
+                postSources model
+                model, Cmd.none
+        | RetryPdfProcessing id ->
+            match documentMutationBlocked model "Retrying document processing" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let retry =
+                    model.pdfDocuments
+                    |> List.filter (fun doc -> doc.id = id && doc.status = Failed)
+
+                if List.isEmpty retry then
+                    model, Cmd.none
+                else
+                    let ids = retry |> List.map _.id |> Set.ofList
+
+                    let model =
+                        { model with
+                            pdfDocuments = retryDocs ids model.pdfDocuments
+                            isBusy = true }
+
+                    let report msg =
+                        model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+
+                    Settings.setPdfLibrary model.pdfDocuments
+                    model, Cmd.OfAsync.either (processDocuments report) retry PdfProcessingCompleted EventError
         | DeletePdf id ->
-            match model.pdfDocuments |> List.tryFind (fun doc -> doc.id = id) with
-            | None -> model, Cmd.none
-            | Some doc ->
-                { model with isBusy = true },
-                Cmd.OfAsync.either deleteDocumentAndIndexes doc DeletePdfCompleted EventError
+            match documentMutationBlocked model "Deleting documents" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                match model.pdfDocuments |> List.tryFind (fun doc -> doc.id = id) with
+                | None -> model, Cmd.none
+                | Some doc ->
+                    { model with isBusy = true },
+                    Cmd.OfAsync.either deleteDocumentAndIndexes doc DeletePdfCompleted EventError
         | DeletePdfCompleted(Ok result) ->
             let pdfDocuments =
                 model.pdfDocuments |> List.filter (fun doc -> doc.id <> result.id)
@@ -310,16 +403,22 @@ module Update =
                 log = $"Document delete failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
         | ApplySources ->
-            saveSettings model
-            postSources model
+            match sourceConfigBlocked model "Applying sources" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                saveSettings model
+                postSources model
 
-            let count = sources model |> List.length
+                let count = sources model |> List.length
 
-            { model with
-                log =
-                    $"Configured {count} document source(s)." :: model.log
-                    |> List.truncate C.MAX_LOG },
-            Cmd.none
+                { model with
+                    log =
+                        $"Configured {count} document source(s)." :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
         | StartStop ->
             match model.bundle with
             | None ->
@@ -361,6 +460,7 @@ module Update =
         | Log_Clear -> { model with log = [] }, Cmd.none
         | EventError ex ->
             { model with
+                isBusy = false
                 log = ex.Message :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
 

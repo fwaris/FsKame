@@ -6,7 +6,9 @@ open System.Threading
 open System.Threading.Tasks
 open System.Collections.Generic
 open Microsoft.Extensions.AI
+open System.Text.Json.Serialization
 open FSharp.Control
+open RTOpenAI.Events
 open FsKame.WorkFlow
 
 type MockChatClient() =
@@ -28,8 +30,31 @@ type MockChatClient() =
         member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() } :> IAsyncEnumerable<ChatResponseUpdate>
 
+let private included name value =
+    match value with
+    | Include(Some x) -> x
+    | Include None -> failwith $"{name} was explicitly null."
+    | Skip -> failwith $"{name} was skipped."
 
 
+
+[<Fact>]
+let ``realtime session disables automatic VAD responses and interruptions`` () =
+    let input = VoiceAgent.sessionAudio.input |> included "audio.input"
+    let turnDetection = input.turn_detection |> included "audio.input.turn_detection"
+
+    match turnDetection with
+    | VAD.Server_Vad config ->
+        Assert.False(config.create_response)
+        Assert.False(config.interrupt_response)
+        Assert.Equal(300, config.prefix_padding_ms)
+        Assert.Equal(500, config.silence_duration_ms)
+        Assert.Equal(0.5, config.threshold)
+
+        match config.idle_timeout_ms with
+        | Skip -> ()
+        | Include _ -> failwith "Expected idle_timeout_ms to be skipped."
+    | VAD.Semantic_Vad _ -> failwith "Expected server_vad turn detection."
 
 [<Fact>]
 let ``getSynonyms parses comma-separated keywords correctly`` () =
@@ -44,7 +69,7 @@ let ``getSynonyms parses comma-separated keywords correctly`` () =
             Assert.Equal<int>(2, expansion.terms.Length)
             Assert.Contains("synonym1", expansion.terms)
             Assert.Contains("technicalTerm1", expansion.terms)
-            Assert.Equal<QueryType>(QueryType.Question, expansion.queryType)
+            Assert.Equal<KnowledgeSources.QueryType>(KnowledgeSources.QueryType.Question, expansion.queryType)
             Assert.Contains("Retrieval query", reportedMsg)
         | None -> failwith "Expected query expansion."
     }
