@@ -69,6 +69,7 @@
     <Compile Include="KnowledgeSources.fs" />
     <Compile Include="PdfLibrary.fs" />
     <Compile Include="Agents\SourceAgent.fs" />
+    <Compile Include="Agents\MemoryAgent.fs" />
     <Compile Include="Agents\OracleAgent.fs" />
     <Compile Include="Agents\AsyncPriorityQueue.fs" />
     <Compile Include="Agents\VoiceAgent.fs" />

@@ -680,13 +680,16 @@ Query: {query}
                     List.ofSeq errors
         }
 
+    let private renderedChunkMaxChars = 650
+
     let renderContext (chunks: SourceChunk list) =
         if List.isEmpty chunks then
             "No selected document context was available."
         else
             chunks
+            |> List.truncate C.REALTIME_MEMORY_MAX_CONTEXT_CHUNKS
             |> List.mapi (fun index (chunk: SourceChunk) ->
-                let body = Text.truncate 900 chunk.text
+                let body = Text.truncate renderedChunkMaxChars chunk.text
                 $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{body}")
             |> String.concat "\n\n"
 

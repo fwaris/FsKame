@@ -1,6 +1,7 @@
 namespace FsKame.WorkFlow
 
 open System
+open System.Threading
 open System.Threading.Tasks
 open FsKame
 open RTOpenAI.Events
@@ -43,11 +44,27 @@ type OracleCandidate =
       isFinal: bool
       createdAt: DateTimeOffset }
 
+type MemoryContext =
+    { requestId: string
+      snapshot: TranscriptSnapshot
+      context: SourceChunk list
+      inventory: KnowledgeSource list
+      timedOut: bool
+      createdAt: DateTimeOffset }
+
+type MemoryRequest =
+    { requestId: string
+      snapshot: TranscriptSnapshot
+      deadline: DateTimeOffset
+      cancellationToken: CancellationToken
+      completion: TaskCompletionSource<MemoryContext> }
+
 type VoiceToolCall =
     { name: string
       callId: string
       content: string
       snapshot: TranscriptSnapshot
+      cancellation: CancellationTokenSource
       task: TaskCompletionSource<ContentFunctionCallOutput> }
 
 type FlowMsg =
@@ -64,7 +81,14 @@ type AgentMsg =
            logChunks: bool
            useLexicalFilter: bool |}
     | Ag_TranscriptUpdated of TranscriptSnapshot
+    | Ag_MemoryRequested of MemoryRequest
+    | Ag_MemoryReady of MemoryRequest * MemoryContext
+    | Ag_MemoryRequestCanceled of string
+    | Ag_MemoryRequestFailed of string * string
+    | Ag_MemoryJobStarted of string
+    | Ag_MemoryJobFinished of string * Result<unit, string>
     | Ag_ContextReady of TranscriptSnapshot * SourceChunk list * KnowledgeSource list
+    | Ag_OracleRequested of MemoryRequest * MemoryContext
     | Ag_ResponseReady of TranscriptSnapshot * OracleCandidate option
     | Ag_VoiceServerEvent of ServerEvent
     | Ag_ToolCallOutputReady of string * string
@@ -76,7 +100,14 @@ type AgentMsg =
         | Ag_FlowDone _ -> "Ag_FlowDone"
         | Ag_SourcesUpdated _ -> "Ag_SourcesUpdated"
         | Ag_TranscriptUpdated _ -> "Ag_TranscriptUpdated"
+        | Ag_MemoryRequested _ -> "Ag_MemoryRequested"
+        | Ag_MemoryReady _ -> "Ag_MemoryReady"
+        | Ag_MemoryRequestCanceled _ -> "Ag_MemoryRequestCanceled"
+        | Ag_MemoryRequestFailed _ -> "Ag_MemoryRequestFailed"
+        | Ag_MemoryJobStarted _ -> "Ag_MemoryJobStarted"
+        | Ag_MemoryJobFinished _ -> "Ag_MemoryJobFinished"
         | Ag_ContextReady _ -> "Ag_ContextReady"
+        | Ag_OracleRequested _ -> "Ag_OracleRequested"
         | Ag_ResponseReady _ -> "Ag_ResponseReady"
         | Ag_VoiceServerEvent _ -> "Ag_VoiceServerEvent"
         | Ag_ToolCallOutputReady _ -> "Ag_ToolCallOutputReady"

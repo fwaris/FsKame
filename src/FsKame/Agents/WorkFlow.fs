@@ -21,7 +21,7 @@ module StateMachine =
     let private startAgents ss =
         async {
             AppAgent.start ss.mailbox ss.bus
-            SourceAgent.start (Some ss.apiKey) ss.bus
+            MemoryAgent.start ss.bus
             OracleAgent.start ss.apiKey ss.oracleModel ss.bus
             VoiceAgent.start ss.apiKey ss.conn ss.bus
         }
@@ -43,10 +43,12 @@ module StateMachine =
             | W_Err err -> return F(s_terminate ss, [ Ag_FlowError err; Ag_FlowDone {| abnormal = true |} ])
             | W_Msg Fl_Start ->
                 do! startAgents ss
-                let flags = 
+
+                let flags =
                     {| logExpansions = ss.logExpansions
                        logChunks = ss.logChunks
                        useLexicalFilter = ss.useLexicalFilter |}
+
                 return F(s_run ss, [ Ag_SourcesUpdated(ss.retrievalMode, ss.sources, flags) ])
             | W_Msg(Fl_Terminate x) -> return terminate x.abnormal ss
         }

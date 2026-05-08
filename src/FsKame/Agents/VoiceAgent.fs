@@ -3,6 +3,7 @@ namespace FsKame.WorkFlow
 open System
 open System.Text.Json
 open System.Text.Json.Serialization
+open System.Threading
 open System.Threading.Tasks
 open FSharp.Control
 open RTOpenAI.Api
@@ -45,6 +46,9 @@ module VoiceAgent =
     let private CONTROL_EVENT_PRIORITY = 10
     let private SPEAK_PRIORITY = 20
     let private FUNCTION_CALL_TIMEOUT = TimeSpan.FromSeconds 45.
+
+    let private MEMORY_REQUEST_TIMEOUT =
+        TimeSpan.FromMilliseconds(float FsKame.C.REALTIME_MEMORY_TIMEOUT_MS)
 
     let sessionAudio =
         { Audio.Default with
@@ -172,6 +176,13 @@ After QUERY_DOCUMENT_ORACLE returns:
           isFinal = isFinal
           receivedAt = DateTimeOffset.UtcNow }
 
+    let private createMemoryRequest snapshot cancellationToken =
+        { requestId = Utils.newId ()
+          snapshot = snapshot
+          deadline = DateTimeOffset.UtcNow + MEMORY_REQUEST_TIMEOUT
+          cancellationToken = cancellationToken
+          completion = TaskCompletionSource<MemoryContext>(TaskCreationOptions.RunContinuationsAsynchronously) }
+
     let private isResponseActive =
         function
         | ActiveResponse _ -> true
@@ -233,18 +244,24 @@ After QUERY_DOCUMENT_ORACLE returns:
         match fc.name with
         | ToolNames.QUERY_DOCUMENT_ORACLE ->
             let revision, snapshot = makeTranscriptSnapshot st fc.call_id question true
+            let cancellation = new CancellationTokenSource()
+            cancellation.CancelAfter FUNCTION_CALL_TIMEOUT
 
             let call =
                 { name = fc.name
                   callId = fc.call_id
                   content = fc.arguments
                   snapshot = snapshot
+                  cancellation = cancellation
                   task =
                     TaskCompletionSource<ContentFunctionCallOutput>(TaskCreationOptions.RunContinuationsAsynchronously) }
+
+            let memoryRequest = createMemoryRequest snapshot cancellation.Token
 
             enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY (AwaitToolCall call)
             st.bus.PostToAgent(Ag_Log $"Document oracle tool call started: {question}")
             st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
+            st.bus.PostToAgent(Ag_MemoryRequested memoryRequest)
 
             { st with
                 revision = revision
@@ -314,10 +331,14 @@ After QUERY_DOCUMENT_ORACLE returns:
     let private runAwaitedToolCall (bus: WBus<FlowMsg, AgentMsg>) conn (toolCall: VoiceToolCall) =
         async {
             try
-                let! result = toolCall.task.Task.WaitAsync(FUNCTION_CALL_TIMEOUT) |> Async.AwaitTask
+                let! result =
+                    toolCall.task.Task.WaitAsync(FUNCTION_CALL_TIMEOUT, toolCall.cancellation.Token)
+                    |> Async.AwaitTask
+
                 createFunctionOutputEvent result |> sendClientEvent conn
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, result.output))
             with ex ->
+                toolCall.cancellation.Cancel()
                 let output = "The document oracle took too long to answer. Please try again."
                 let result = ContentFunctionCallOutput.Create toolCall.callId output
                 createFunctionOutputEvent result |> sendClientEvent conn
@@ -440,7 +461,7 @@ After QUERY_DOCUMENT_ORACLE returns:
                         sendClientEvent conn event
                     with ex ->
                         bus.PostToAgent(Ag_Log $"Failed to send realtime client event: {ex.Message}")
-                | AwaitToolCall toolCall -> do! runAwaitedToolCall bus conn toolCall
+                | AwaitToolCall toolCall -> runAwaitedToolCall bus conn toolCall |> Async.Start
             })
 
     let private startAgent outputQueue (bus: WBus<FlowMsg, AgentMsg>) =

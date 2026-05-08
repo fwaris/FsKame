@@ -1,6 +1,7 @@
 namespace FsKame.WorkFlow
 
 open System
+open System.Threading
 open Microsoft.Extensions.AI
 open FSharp.Control
 open RTFlow
@@ -9,8 +10,8 @@ open RTFlow.Functions
 module OracleAgent =
     type State =
         { bus: WBus<FlowMsg, AgentMsg>
-          apiKey: string
-          modelId: string }
+          modelId: string
+          client: IChatClient option }
 
     let private createClient (key: string) (modelId: string) : IChatClient =
         let client = OpenAI.OpenAIClient(key)
@@ -31,27 +32,28 @@ module OracleAgent =
 
     let private runOracle
         (st: State)
+        (cancellationToken: CancellationToken)
         (snapshot: TranscriptSnapshot)
         (context: SourceChunk list)
         (inventory: KnowledgeSource list)
         =
         async {
-            if String.IsNullOrWhiteSpace st.apiKey then
+            match st.client with
+            | None ->
                 st.bus.PostToAgent(
                     Ag_Log "OpenAI key is missing; realtime will answer without backend oracle guidance."
                 )
 
                 st.bus.PostToAgent(Ag_ResponseReady(snapshot, None))
-            else
+            | Some client ->
                 try
                     st.bus.PostToAgent(Ag_Log $"Oracle request for turn {snapshot.turnId}.")
-                    use client = createClient st.apiKey st.modelId
                     let opts = ChatOptions()
                     opts.Temperature <- Nullable 0.2f
-                    opts.MaxOutputTokens <- Nullable 300
+                    opts.MaxOutputTokens <- Nullable 180
 
                     let! resp =
-                        client.GetResponseAsync(prompt snapshot context inventory, opts)
+                        client.GetResponseAsync(prompt snapshot context inventory, opts, cancellationToken)
                         |> Async.AwaitTask
 
                     let answer = resp.Text |> FsKame.Text.normalizeWhitespace
@@ -74,16 +76,27 @@ module OracleAgent =
     let private update (st: State) (msg: AgentMsg) =
         async {
             match msg with
-            | Ag_ContextReady(snapshot, context, inventory) ->
-                do! runOracle st snapshot context inventory
+            | Ag_OracleRequested(request, memoryContext) ->
+                runOracle st request.cancellationToken request.snapshot memoryContext.context memoryContext.inventory
+                |> Async.Start
+
+                return st
+            | Ag_FlowDone _ ->
+                st.client |> Option.iter (fun client -> client.Dispose())
                 return st
             | _ -> return st
         }
 
     let start apiKey modelId bus =
+        let client =
+            if String.IsNullOrWhiteSpace apiKey then
+                None
+            else
+                Some(createClient apiKey modelId)
+
         let st0 =
             { bus = bus
-              apiKey = apiKey
-              modelId = modelId }
+              modelId = modelId
+              client = client }
 
         bus.AgentBus.RunAsync("oracle", st0, update) |> FlowUtils.catch bus.PostToFlow
