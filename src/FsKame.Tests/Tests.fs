@@ -9,6 +9,7 @@ open Microsoft.Extensions.AI
 open System.Text.Json.Serialization
 open FSharp.Control
 open RTOpenAI.Events
+open FsKame
 open FsKame.WorkFlow
 
 type MockChatClient() =
@@ -36,7 +37,18 @@ let private included name value =
     | Include None -> failwith $"{name} was explicitly null."
     | Skip -> failwith $"{name} was skipped."
 
+[<Theory>]
+[<InlineData("gpt-5.5")>]
+[<InlineData("gpt-5.5-mini")>]
+[<InlineData(" GPT-5.5 ")>]
+let ``model capability omits temperature for models that reject it`` modelId =
+    Assert.False(ModelCapabilities.supportsTemperature modelId)
 
+[<Theory>]
+[<InlineData("gpt-5.1")>]
+[<InlineData("gpt-4.1-mini")>]
+let ``model capability keeps temperature for supported models`` modelId =
+    Assert.True(ModelCapabilities.supportsTemperature modelId)
 
 [<Fact>]
 let ``realtime session enables automatic VAD tool responses and interruptions`` () =

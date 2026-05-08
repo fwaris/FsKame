@@ -3,6 +3,7 @@ namespace FsKame.WorkFlow
 open System
 open System.Threading
 open FsKame
+open Microsoft.SemanticKernel
 open RTFlow
 open RTFlow.Functions
 
@@ -11,10 +12,29 @@ module MemoryAgent =
         { bus: WBus<FlowMsg, AgentMsg>
           retrievalMode: RetrievalMode
           retrieval: KnowledgeSources.RetrievalIndex
+          toolHostContext: ToolHostContext
+          toolCatalog: ToolCatalog
           logExpansions: bool
           logChunks: bool
           useLexicalFilter: bool
           inFlight: Map<string, MemoryRequest> }
+
+    let private card kind title content source =
+        { kind = kind
+          title = title
+          content = content
+          source = source
+          createdAt = DateTimeOffset.UtcNow }
+
+    let private rememberCards (st: State) cards =
+        for card in cards do
+            st.toolHostContext.Blackboard.Enqueue card
+
+    let private configureToolContext (st: State) =
+        st.toolHostContext.Retrieval <- st.retrieval
+        st.toolHostContext.LogExpansions <- st.logExpansions
+        st.toolHostContext.LogChunks <- st.logChunks
+        st.toolHostContext.UseLexicalFilter <- st.useLexicalFilter
 
     let private loadSources (st: State) mode (sources: KnowledgeSource list) =
         async {
@@ -35,10 +55,13 @@ module MemoryAgent =
             KnowledgeSources.disposeIndex st.retrieval
             st.bus.PostToAgent(Ag_Log $"Loaded {retrieval.chunks.Length} source chunk(s).")
 
-            return
+            let st =
                 { st with
                     retrievalMode = mode
                     retrieval = retrieval }
+
+            configureToolContext st
+            return st
         }
 
     let private remainingTimeout (request: MemoryRequest) =
@@ -53,14 +76,94 @@ module MemoryAgent =
         (request: MemoryRequest)
         (retrieval: KnowledgeSources.RetrievalIndex)
         (chunks: SourceChunk list)
+        (cards: MemoryCard list)
         timedOut
         : MemoryContext =
         { requestId = request.requestId
           snapshot = request.snapshot
           context = chunks
           inventory = retrieval.sources
+          cards = cards
           timedOut = timedOut
           createdAt = DateTimeOffset.UtcNow }
+
+    let private looksLikeInventoryQuestion (text: string) =
+        let text = text.ToLowerInvariant()
+
+        [ "what documents"
+          "which documents"
+          "selected documents"
+          "sources"
+          "inventory"
+          "files" ]
+        |> List.exists text.Contains
+
+    let private looksLikeFollowUp (text: string) =
+        let text = text.ToLowerInvariant()
+
+        [ "that"; "those"; "it"; "previous"; "earlier"; "follow up"; "again" ]
+        |> List.exists text.Contains
+
+    let private plannedFunctions (snapshot: TranscriptSnapshot) =
+        let text = snapshot.text
+
+        [ if looksLikeInventoryQuestion text then
+              yield "FsKameTools", "source_inventory"
+
+          if looksLikeFollowUp text then
+              yield "FsKameTools", "blackboard_search"
+
+          yield "FsKameTools", "selected_source_search" ]
+
+    let private kernelFromCatalog (catalog: ToolCatalog) =
+        let builder = Kernel.CreateBuilder()
+
+        for plugin in catalog.plugins do
+            builder.Plugins.Add plugin |> ignore
+
+        builder.Build()
+
+    let private invokeFunction (kernel: Kernel) cancellationToken pluginName functionName question =
+        task {
+            let args = KernelArguments()
+
+            args["question"] <- question
+            args["query"] <- question
+            args["maxResults"] <- C.REALTIME_MEMORY_CANDIDATE_CHUNKS
+
+            let! result = kernel.InvokeAsync<string>(pluginName, functionName, args, cancellationToken)
+            return result |> FsKame.Text.normalizeWhitespace
+        }
+        |> Async.AwaitTask
+
+    let private runToolPlan (st: State) (request: MemoryRequest) cancellationToken =
+        async {
+            let kernel = kernelFromCatalog st.toolCatalog
+            let planned = plannedFunctions request.snapshot
+
+            let planCard =
+                let content =
+                    planned
+                    |> List.map (fun (pluginName, functionName) -> $"{pluginName}.{functionName}")
+                    |> String.concat "\n"
+
+                card ToolPlan "Deterministic tool plan" content (Some "MemoryAgent")
+
+            let cards =
+                ResizeArray<MemoryCard>([ card UserIntent "Final user turn" request.snapshot.text None; planCard ])
+
+            for pluginName, functionName in planned do
+                try
+                    let! output = invokeFunction kernel cancellationToken pluginName functionName request.snapshot.text
+
+                    let title = $"{pluginName}.{functionName}"
+                    cards.Add(card ToolObservation title output (Some title))
+                with ex ->
+                    let title = $"{pluginName}.{functionName}"
+                    cards.Add(card OpenQuestion title $"Tool invocation failed: {ex.Message}" (Some title))
+
+            return List.ofSeq cards
+        }
 
     let private chunkKey (chunk: SourceChunk) =
         chunk.source.location.ToLowerInvariant(), chunk.index
@@ -121,6 +224,9 @@ module MemoryAgent =
                     CancellationTokenSource.CreateLinkedTokenSource(request.cancellationToken, timeoutCts.Token)
 
                 try
+                    configureToolContext st
+                    let! cards = runToolPlan st request linkedCts.Token
+
                     let ranking =
                         KnowledgeSources.rank
                             None
@@ -137,7 +243,19 @@ module MemoryAgent =
                     let! ranked = rankingTask.WaitAsync(timeout, linkedCts.Token) |> Async.AwaitTask
                     let chunks = contextCandidates st.retrieval ranked
 
-                    let context = createContext request st.retrieval chunks false
+                    let evidence =
+                        chunks
+                        |> List.truncate 4
+                        |> List.map (fun chunk ->
+                            card
+                                Evidence
+                                $"{chunk.source.DisplayName} chunk {chunk.index}"
+                                (Text.truncate 650 chunk.text)
+                                (Some chunk.source.location))
+
+                    let cards = cards @ evidence
+                    rememberCards st cards
+                    let context = createContext request st.retrieval chunks cards false
                     st.bus.PostToAgent(Ag_MemoryReady(request, context))
                     st.bus.PostToAgent(Ag_MemoryJobFinished(request.requestId, Ok()))
                 with
@@ -145,11 +263,27 @@ module MemoryAgent =
                     st.bus.PostToAgent(Ag_MemoryRequestCanceled request.requestId)
                     st.bus.PostToAgent(Ag_MemoryJobFinished(request.requestId, Error "Canceled"))
                 | :? TimeoutException ->
-                    let context = createContext request st.retrieval [] true
+                    let cards =
+                        [ card
+                              OpenQuestion
+                              "Memory timeout"
+                              "Tool planning or retrieval timed out."
+                              (Some "MemoryAgent") ]
+
+                    rememberCards st cards
+                    let context = createContext request st.retrieval [] cards true
                     st.bus.PostToAgent(Ag_MemoryReady(request, context))
                     st.bus.PostToAgent(Ag_MemoryJobFinished(request.requestId, Error "Timed out"))
                 | :? OperationCanceledException ->
-                    let context = createContext request st.retrieval [] true
+                    let cards =
+                        [ card
+                              OpenQuestion
+                              "Memory timeout"
+                              "Tool planning or retrieval timed out."
+                              (Some "MemoryAgent") ]
+
+                    rememberCards st cards
+                    let context = createContext request st.retrieval [] cards true
                     st.bus.PostToAgent(Ag_MemoryReady(request, context))
                     st.bus.PostToAgent(Ag_MemoryJobFinished(request.requestId, Error "Timed out"))
                 | ex ->
@@ -247,14 +381,17 @@ module MemoryAgent =
             | _ -> return st
         }
 
-    let start bus =
+    let start bus toolHostContext toolCatalog =
         let st0 =
             { bus = bus
               retrievalMode = FsColbertWithFallback
               retrieval = KnowledgeSources.emptyIndex
+              toolHostContext = toolHostContext
+              toolCatalog = toolCatalog
               logExpansions = false
               logChunks = false
               useLexicalFilter = true
               inFlight = Map.empty }
 
+        configureToolContext st0
         bus.AgentBus.RunAsync("memory", st0, update) |> FlowUtils.catch bus.PostToFlow

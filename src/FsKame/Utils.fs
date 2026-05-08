@@ -42,3 +42,17 @@ module Text =
             value
         else
             value.Substring(0, maxChars).TrimEnd() + "..."
+
+module ModelCapabilities =
+    let private temperatureUnsupportedPrefixes = [ "gpt-5.5" ]
+
+    let supportsTemperature (modelId: string) =
+        let modelId =
+            modelId
+            |> Option.ofObj
+            |> Option.defaultValue ""
+            |> fun value -> value.Trim().ToLowerInvariant()
+
+        temperatureUnsupportedPrefixes
+        |> List.exists (fun prefix -> modelId = prefix || modelId.StartsWith(prefix + "-"))
+        |> not

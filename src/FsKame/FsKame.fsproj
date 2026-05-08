@@ -64,9 +64,10 @@
     <Compile Include="PdfSourcesModel.fs" />
     <Compile Include="Settings.fs" />
     <Compile Include="WorkFlowTypes.fs" />
-    <Compile Include="Model.fs" />
     <Compile Include="Audio.fs" />
     <Compile Include="KnowledgeSources.fs" />
+    <Compile Include="Tooling.fs" />
+    <Compile Include="Model.fs" />
     <Compile Include="PdfLibrary.fs" />
     <Compile Include="Agents\SourceAgent.fs" />
     <Compile Include="Agents\MemoryAgent.fs" />
@@ -149,6 +150,7 @@
     <PackageReference Include="FSharp.SystemTextJson" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+    <PackageReference Include="Microsoft.SemanticKernel" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Extensions" />
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />

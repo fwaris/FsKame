@@ -2,6 +2,7 @@ namespace FsKame.WorkFlow
 
 open System
 open System.Threading
+open FsKame
 open Microsoft.Extensions.AI
 open FSharp.Control
 open RTFlow
@@ -17,17 +18,33 @@ module OracleAgent =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
 
-    let private prompt (snapshot: TranscriptSnapshot) (context: SourceChunk list) (inventory: KnowledgeSource list) =
+    let private renderCards (cards: MemoryCard list) =
+        if List.isEmpty cards then
+            "No tool observations were recorded."
+        else
+            cards
+            |> List.truncate 12
+            |> List.mapi (fun index card ->
+                $"[{index + 1}] {card.kind}: {card.title}\n{Text.truncate 900 card.content}")
+            |> String.concat "\n\n"
+
+    let private prompt
+        (snapshot: TranscriptSnapshot)
+        (context: SourceChunk list)
+        (inventory: KnowledgeSource list)
+        (cards: MemoryCard list)
+        =
         let sourceContext = KnowledgeSources.renderContext context
         let inventory = KnowledgeSources.renderInventory inventory
+        let observations = renderCards cards
 
         [ ChatMessage(
               ChatRole.System,
-              "You are FsKame's backend oracle in strict document mode. Answer only from the selected PDF inventory and matched PDF context. Do not use general knowledge. If the answer is not present in the selected PDFs, say briefly that the selected documents do not contain that answer. If no selected PDFs are available, say no documents are currently selected. Keep answers conversational and brief, usually one to three short sentences."
+              "You are FsKame's backend oracle in strict document mode. Answer only from selected tool observations, selected PDF inventory, and matched PDF context. Do not use general knowledge. If the observations and context do not contain the answer, say briefly that the selected documents do not contain that answer. If no selected PDFs are available, say no documents are currently selected. Keep answers conversational and brief, usually one to three short sentences."
           )
           ChatMessage(
               ChatRole.User,
-              $"User transcript:\n{snapshot.text}\n\nSelected PDF inventory:\n{inventory}\n\nMatched PDF context:\n{sourceContext}\n\nReturn only what the realtime voice agent should say now."
+              $"User transcript:\n{snapshot.text}\n\nCurrent tool observations and task-board cards:\n{observations}\n\nSelected PDF inventory:\n{inventory}\n\nMatched PDF context:\n{sourceContext}\n\nReturn only what the realtime voice agent should say now."
           ) ]
 
     let private runOracle
@@ -36,6 +53,7 @@ module OracleAgent =
         (snapshot: TranscriptSnapshot)
         (context: SourceChunk list)
         (inventory: KnowledgeSource list)
+        (cards: MemoryCard list)
         =
         async {
             match st.client with
@@ -49,11 +67,14 @@ module OracleAgent =
                 try
                     st.bus.PostToAgent(Ag_Log $"Oracle request for turn {snapshot.turnId}.")
                     let opts = ChatOptions()
-                    opts.Temperature <- Nullable 0.2f
+
+                    if ModelCapabilities.supportsTemperature st.modelId then
+                        opts.Temperature <- Nullable 0.2f
+
                     opts.MaxOutputTokens <- Nullable 180
 
                     let! resp =
-                        client.GetResponseAsync(prompt snapshot context inventory, opts, cancellationToken)
+                        client.GetResponseAsync(prompt snapshot context inventory cards, opts, cancellationToken)
                         |> Async.AwaitTask
 
                     let answer = resp.Text |> FsKame.Text.normalizeWhitespace
@@ -77,7 +98,13 @@ module OracleAgent =
         async {
             match msg with
             | Ag_OracleRequested(request, memoryContext) ->
-                runOracle st request.cancellationToken request.snapshot memoryContext.context memoryContext.inventory
+                runOracle
+                    st
+                    request.cancellationToken
+                    request.snapshot
+                    memoryContext.context
+                    memoryContext.inventory
+                    memoryContext.cards
                 |> Async.Start
 
                 return st

@@ -1,6 +1,7 @@
 namespace FsKame
 
 open System
+open System.Collections.Concurrent
 open FsKame.WorkFlow
 open RTOpenAI.Api
 
@@ -17,6 +18,23 @@ module Connect =
                         return Error(UnauthorizedAccessException "Microphone permission was not granted." :> exn)
                     else
                         let conn = Connection.create ()
+                        let blackboard = ConcurrentQueue<MemoryCard>()
+
+                        let toolHostContext =
+                            ToolHostContext(
+                                (fun msg -> parms.mailbox.Writer.TryWrite(Log_Append msg) |> ignore),
+                                blackboard
+                            )
+
+                        let loadedCatalog =
+                            ToolLoader.load toolHostContext (ToolLoader.defaultProviderFolder ())
+
+                        let toolCatalog =
+                            { plugins = parms.toolCatalog.plugins @ loadedCatalog.plugins
+                              logs = parms.toolCatalog.logs @ loadedCatalog.logs }
+
+                        for log in toolCatalog.logs do
+                            parms.mailbox.Writer.TryWrite(Log_Append log) |> ignore
 
                         let stateSubscription =
                             conn.WebRtcClient.StateChanged.Subscribe(fun state ->
@@ -34,6 +52,8 @@ module Connect =
                                 parms.retrievalMode
                                 conn
                                 parms.sources
+                                toolHostContext
+                                toolCatalog
                                 parms.logExpansions
                                 parms.logChunks
                                 parms.useLexicalFilter

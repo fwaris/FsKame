@@ -162,7 +162,8 @@ module Update =
           mailbox = model.mailbox
           logExpansions = model.logExpansions
           logChunks = model.logChunks
-          useLexicalFilter = model.useLexicalFilter }
+          useLexicalFilter = model.useLexicalFilter
+          toolCatalog = ToolCatalog.empty }
 
     let init () =
         { currentPage = Main

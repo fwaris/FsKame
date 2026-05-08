@@ -14,6 +14,8 @@ module StateMachine =
           retrievalMode: RetrievalMode
           conn: RTOpenAI.Api.Connection
           sources: KnowledgeSource list
+          toolHostContext: ToolHostContext
+          toolCatalog: ToolCatalog
           logExpansions: bool
           logChunks: bool
           useLexicalFilter: bool }
@@ -21,7 +23,7 @@ module StateMachine =
     let private startAgents ss =
         async {
             AppAgent.start ss.mailbox ss.bus
-            MemoryAgent.start ss.bus
+            MemoryAgent.start ss.bus ss.toolHostContext ss.toolCatalog
             OracleAgent.start ss.apiKey ss.oracleModel ss.bus
             VoiceAgent.start ss.apiKey ss.conn ss.bus
         }
@@ -63,7 +65,19 @@ module StateMachine =
 
     and private s_terminate ss _ = async { return F(s_terminate ss, []) }
 
-    let create mailbox apiKey oracleModel retrievalMode conn sources logExpansions logChunks useLexicalFilter =
+    let create
+        mailbox
+        apiKey
+        oracleModel
+        retrievalMode
+        conn
+        sources
+        toolHostContext
+        toolCatalog
+        logExpansions
+        logChunks
+        useLexicalFilter
+        =
         let bus = WBus<FlowMsg, AgentMsg>.Create()
 
         let ss =
@@ -74,6 +88,8 @@ module StateMachine =
               retrievalMode = retrievalMode
               conn = conn
               sources = sources
+              toolHostContext = toolHostContext
+              toolCatalog = toolCatalog
               logExpansions = logExpansions
               logChunks = logChunks
               useLexicalFilter = useLexicalFilter }

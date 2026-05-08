@@ -21,7 +21,8 @@ type StartParams =
       mailbox: Channel<Msg>
       logExpansions: bool
       logChunks: bool
-      useLexicalFilter: bool }
+      useLexicalFilter: bool
+      toolCatalog: ToolCatalog }
 
 and Model =
     { currentPage: AppPage

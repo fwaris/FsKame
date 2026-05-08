@@ -44,11 +44,28 @@ type OracleCandidate =
       isFinal: bool
       createdAt: DateTimeOffset }
 
+type MemoryCardKind =
+    | UserIntent
+    | ToolPlan
+    | ToolObservation
+    | Evidence
+    | OpenQuestion
+    | ResolvedAnswer
+    | CurrentFocus
+
+type MemoryCard =
+    { kind: MemoryCardKind
+      title: string
+      content: string
+      source: string option
+      createdAt: DateTimeOffset }
+
 type MemoryContext =
     { requestId: string
       snapshot: TranscriptSnapshot
       context: SourceChunk list
       inventory: KnowledgeSource list
+      cards: MemoryCard list
       timedOut: bool
       createdAt: DateTimeOffset }
 
