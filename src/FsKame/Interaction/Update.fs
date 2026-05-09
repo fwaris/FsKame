@@ -28,6 +28,9 @@ module Update =
     let private canMutateDocuments model =
         not model.isBusy && not (isRealtimeActive model)
 
+    let private canChangeSourceSelection model =
+        not model.isBusy && not (isRealtimeActive model)
+
     let private documentMutationBlocked model action =
         if model.isBusy then
             Some $"{action} is unavailable while another operation is running."
@@ -333,8 +336,13 @@ module Update =
                     |> List.truncate C.MAX_LOG },
             Cmd.none
         | PdfSelectionChanged(id, selected) ->
-            if not (canMutateDocuments model) then
-                model, Cmd.none
+            if not (canChangeSourceSelection model) then
+                { model with
+                    log =
+                        "Changing selected sources is unavailable while realtime is connected or another operation is running."
+                        :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
             else
                 let pdfDocuments =
                     model.pdfDocuments

@@ -40,11 +40,11 @@ module OracleAgent =
 
         [ ChatMessage(
               ChatRole.System,
-              "You are FsKame's backend oracle in strict document mode. Answer only from selected tool observations, selected PDF inventory, and matched PDF context. Do not use general knowledge. If the observations and context do not contain the answer, say briefly that the selected documents do not contain that answer. If no selected PDFs are available, say no documents are currently selected. Keep answers conversational and brief, usually one to three short sentences."
+              "You are FsKame's backend oracle. Answer general questions directly when no tool or selected source context is required. When tool observations, task-board cards, selected source inventory, or matched source context are relevant, use them and treat tool observations as authoritative for current/session-specific facts such as time, app state, and source lookup. For volatile live information such as weather, breaking news, market prices, or stock quotes, only give current values when a tool observation provides them; otherwise say briefly that no live data tool is available for that value. Do not invent unavailable tool results, source details, citations, live values, or app state. Keep answers conversational and brief, usually one to three short sentences."
           )
           ChatMessage(
               ChatRole.User,
-              $"User transcript:\n{snapshot.text}\n\nCurrent tool observations and task-board cards:\n{observations}\n\nSelected PDF inventory:\n{inventory}\n\nMatched PDF context:\n{sourceContext}\n\nReturn only what the realtime voice agent should say now."
+              $"User transcript:\n{snapshot.text}\n\nCurrent tool observations and task-board cards:\n{observations}\n\nSelected source inventory:\n{inventory}\n\nMatched source context:\n{sourceContext}\n\nReturn only what the realtime voice agent should say now."
           ) ]
 
     let private runOracle

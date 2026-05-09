@@ -30,6 +30,9 @@ module MemoryAgent =
         for card in cards do
             st.toolHostContext.Blackboard.Enqueue card
 
+    let private clearRememberedCards (st: State) =
+        st.toolHostContext.Blackboard.Clear()
+
     let private configureToolContext (st: State) =
         st.toolHostContext.Retrieval <- st.retrieval
         st.toolHostContext.LogExpansions <- st.logExpansions
@@ -94,6 +97,7 @@ module MemoryAgent =
           "which documents"
           "selected documents"
           "sources"
+          "which sources"
           "inventory"
           "files" ]
         |> List.exists text.Contains
@@ -104,10 +108,28 @@ module MemoryAgent =
         [ "that"; "those"; "it"; "previous"; "earlier"; "follow up"; "again" ]
         |> List.exists text.Contains
 
+    let private looksLikeTimeQuestion (text: string) =
+        let text = text.ToLowerInvariant()
+
+        [ "what time"
+          "what is the time"
+          "what's the time"
+          "tell me the time"
+          "current time"
+          "time is it"
+          "today's date"
+          "todays date"
+          "current date"
+          "what date" ]
+        |> List.exists text.Contains
+
     let private plannedFunctions (snapshot: TranscriptSnapshot) =
         let text = snapshot.text
 
-        [ if looksLikeInventoryQuestion text then
+        [ if looksLikeTimeQuestion text then
+              yield "FsKameTools", "current_time"
+
+          if looksLikeInventoryQuestion text then
               yield "FsKameTools", "source_inventory"
 
           if looksLikeFollowUp text then
@@ -331,6 +353,13 @@ module MemoryAgent =
             { st with
                 inFlight = st.inFlight |> Map.remove requestId }
 
+    let private cancelInFlightRequests (st: State) reason =
+        for KeyValue(requestId, request) in st.inFlight do
+            request.completion.TrySetCanceled request.cancellationToken |> ignore
+            st.bus.PostToAgent(Ag_Log $"Memory request {requestId} was canceled: {reason}")
+
+        { st with inFlight = Map.empty }
+
     let private failRequest (st: State) requestId message =
         match st.inFlight |> Map.tryFind requestId with
         | None -> st
@@ -346,6 +375,9 @@ module MemoryAgent =
         async {
             match msg with
             | Ag_SourcesUpdated(mode, sources, flags) ->
+                let st = cancelInFlightRequests st "selected sources changed"
+                clearRememberedCards st
+
                 let st =
                     { st with
                         logExpansions = flags.logExpansions

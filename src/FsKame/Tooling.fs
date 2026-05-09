@@ -8,6 +8,7 @@ open System.Reflection
 open System.Runtime.InteropServices
 open System.Threading.Tasks
 open FsKame
+open FsKame.Tools
 open Microsoft.Maui.Storage
 open Microsoft.SemanticKernel
 
@@ -47,7 +48,7 @@ type SelectedSourceSearchTool(context: ToolHostContext) =
     [<Description("Searches the currently selected PDF and Markdown sources for passages relevant to the request.")>]
     member _.Search
         (
-            [<Description("The user's document question or standalone retrieval request.")>] question: string,
+            [<Description("The user's source-related question or standalone retrieval request.")>] question: string,
             [<Description("The maximum number of source passages to return.")>] maxResults: int
         ) =
         task {
@@ -93,19 +94,24 @@ module ToolLoader =
     let private builtInToolTypes =
         [ typeof<SelectedSourceSearchTool>
           typeof<SourceInventoryTool>
-          typeof<BlackboardSearchTool> ]
+          typeof<BlackboardSearchTool>
+          typeof<CurrentTimeTool> ]
 
     let private ctorAcceptsContext (toolType: Type) =
         toolType.GetConstructor([| typeof<ToolHostContext> |]) |> isNull |> not
 
     let private createTool context (toolType: Type) =
-        if not (ctorAcceptsContext toolType) then
-            Error $"Tool type {toolType.FullName} must expose a public constructor that accepts ToolHostContext."
-        else
-            try
+        try
+            if ctorAcceptsContext toolType then
                 Activator.CreateInstance(toolType, [| context :> obj |]) |> Ok
-            with ex ->
-                Error $"Unable to create tool type {toolType.FullName}: {ex.Message}"
+            else
+                match toolType.GetConstructor(Type.EmptyTypes) with
+                | null ->
+                    Error
+                        $"Tool type {toolType.FullName} must expose a public constructor that accepts ToolHostContext or a public parameterless constructor."
+                | ctor -> ctor.Invoke(Array.empty) |> Ok
+        with ex ->
+            Error $"Unable to create tool type {toolType.FullName}: {ex.Message}"
 
     let private createPlugin context pluginName (toolTypes: Type list) =
         let tools = ResizeArray<obj>()

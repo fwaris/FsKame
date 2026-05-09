@@ -14,7 +14,7 @@ open RTFlow.Functions
 module VoiceAgent =
     module private ToolNames =
         [<Literal>]
-        let QUERY_DOCUMENT_ORACLE = "QUERY_DOCUMENT_ORACLE"
+        let QUERY_ORACLE = "QUERY_ORACLE"
 
     type private Q =
         | SendClientEvent of ClientEvent
@@ -61,7 +61,7 @@ module VoiceAgent =
                                   model = "gpt-4o-mini-transcribe"
                                   prompt =
                                     Some
-                                        "Expect natural question-answering conversation over selected PDF and Markdown documents." }
+                                        "Expect natural spoken question-answering conversation. Requests may involve a wide variety of questions" }
                                 |> Some
                                 |> Include
                             turn_detection =
@@ -77,30 +77,31 @@ module VoiceAgent =
                 ) }
 
     let private instructions =
-        """You are FsKame's low-latency spoken front-end for document question answering.
+        """You are FsKame's low-latency spoken front-end for question answering.
 
 Allowed direct actions:
 - greet the user
 - handle short rapport, repetition, or simple clarification
-- ask a brief follow-up when the request is too vague to search safely
-- say a short preamble before a tool call, such as "Let me check the documents."
+- ask a brief follow-up when the request is too vague to answer safely
+- answer simple conversational turns directly
+- say a short preamble before a tool call, such as "Let me check that."
 
 Tool use:
-- For every substantive question, summary, comparison, or follow-up that needs information from selected PDFs or Markdown documents, call QUERY_DOCUMENT_ORACLE.
+- For every question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
 - Pass the user's request as the `question` argument.
-- Do not answer document questions from your own knowledge.
-- Do not invent source details, page contents, citations, or facts.
+- Do not refuse a request just because it is not about documents or selected sources.
+- Do not invent tool results, source details, page contents, citations, live values, or app state.
 
-After QUERY_DOCUMENT_ORACLE returns:
+After QUERY_ORACLE returns:
 - Treat the tool result as the authoritative answer.
 - Speak the tool result naturally and briefly, without adding new facts.
-- If the tool says the documents do not contain the answer, say that plainly."""
+- If the tool says there is not enough information, say that plainly."""
 
-    let private documentOracleTool =
+    let private oracleTool =
         { Tool.Default with
-            name = ToolNames.QUERY_DOCUMENT_ORACLE
+            name = ToolNames.QUERY_ORACLE
             description =
-                "Use this to answer any user question that requires selected PDF or Markdown document content. The tool returns the exact grounded wording to speak."
+                "Use this for every substantive user question. It can answer with the backend oracle using available tools, app context, selected sources, and general reasoning. The tool returns the exact wording to speak."
             parameters =
                 { Parameters.Default with
                     properties =
@@ -109,7 +110,7 @@ After QUERY_DOCUMENT_ORACLE returns:
                               JsProperty.String
                                   { description =
                                       Some
-                                          "The user's document question or follow-up, rewritten as a concise standalone request."
+                                          "The user's question or follow-up, rewritten as a concise standalone request."
                                     enum = None } ]
                     required = [ "question" ] } }
 
@@ -121,7 +122,7 @@ After QUERY_DOCUMENT_ORACLE returns:
             audio = Include(Some sessionAudio)
             instructions = Some instructions
             tool_choice = Include(Some "auto")
-            tools = Include(Some [ documentOracleTool ])
+            tools = Include(Some [ oracleTool ])
             expires_at = Skip }
 
     let private enqueueOutbound (outputQueue: AsyncPriorityQueue<Q>) priority work = outputQueue.Enqueue(work, priority)
@@ -160,7 +161,7 @@ After QUERY_DOCUMENT_ORACLE returns:
         |> ClientEvent.ConversationItemCreate
 
     let private fallbackToolOutput (snapshot: TranscriptSnapshot) =
-        $"I cannot answer that from the selected documents right now. The user asked: {snapshot.text}"
+        $"I cannot answer that from the available tools and context right now. The user asked: {snapshot.text}"
 
     let private oracleToolOutput (_snapshot: TranscriptSnapshot) (candidate: OracleCandidate) =
         candidate.answer |> FsKame.Text.normalizeWhitespace
@@ -189,7 +190,7 @@ After QUERY_DOCUMENT_ORACLE returns:
         | NoActiveResponse -> false
 
     let private speakToolResultInstructions text =
-        $"The document oracle tool returned this grounded answer. Speak it to the user naturally and briefly. Do not add facts or reinterpret it.\n\n{text}"
+        $"The oracle tool returned this grounded answer. Speak it to the user naturally and briefly. Do not add facts or reinterpret it.\n\n{text}"
 
     let private tryScheduleSpeak (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
@@ -198,7 +199,7 @@ After QUERY_DOCUMENT_ORACLE returns:
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
-            st.bus.PostToAgent(Ag_Log "Realtime response requested from document oracle tool output.")
+            st.bus.PostToAgent(Ag_Log "Realtime response requested from oracle tool output.")
 
             { st with
                 responseCreatedState = ActiveResponse {| id = None |}
@@ -237,12 +238,12 @@ After QUERY_DOCUMENT_ORACLE returns:
 
         let question =
             if String.IsNullOrWhiteSpace question then
-                "The user asked a document question, but the tool call did not include the question text."
+                "The user asked a question, but the tool call did not include the question text."
             else
                 question
 
         match fc.name with
-        | ToolNames.QUERY_DOCUMENT_ORACLE ->
+        | ToolNames.QUERY_ORACLE  ->
             let revision, snapshot = makeTranscriptSnapshot st fc.call_id question true
             let cancellation = new CancellationTokenSource()
             cancellation.CancelAfter FUNCTION_CALL_TIMEOUT
@@ -259,7 +260,7 @@ After QUERY_DOCUMENT_ORACLE returns:
             let memoryRequest = createMemoryRequest snapshot cancellation.Token
 
             enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY (AwaitToolCall call)
-            st.bus.PostToAgent(Ag_Log $"Document oracle tool call started: {question}")
+            st.bus.PostToAgent(Ag_Log $"Oracle tool call started: {question}")
             st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
             st.bus.PostToAgent(Ag_MemoryRequested memoryRequest)
 
@@ -299,7 +300,7 @@ After QUERY_DOCUMENT_ORACLE returns:
                 |> call.task.TrySetResult
                 |> ignore
 
-                st.bus.PostToAgent(Ag_Log $"Document oracle tool call completed for turn {snapshot.turnId}.")
+                st.bus.PostToAgent(Ag_Log $"Oracle tool call completed for turn {snapshot.turnId}.")
 
                 { st with
                     pendingToolCalls = st.pendingToolCalls |> Map.remove snapshot.turnId
@@ -322,7 +323,7 @@ After QUERY_DOCUMENT_ORACLE returns:
         if String.IsNullOrWhiteSpace output then
             st
         else
-            st.bus.PostToAgent(Ag_Log $"Document oracle tool output ready for call {callId}.")
+            st.bus.PostToAgent(Ag_Log $"Oracle tool output ready for call {callId}.")
 
             { st with
                 pendingSpeakTexts = st.pendingSpeakTexts @ [ output ] }
@@ -339,10 +340,10 @@ After QUERY_DOCUMENT_ORACLE returns:
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, result.output))
             with ex ->
                 toolCall.cancellation.Cancel()
-                let output = "The document oracle took too long to answer. Please try again."
+                let output = "The oracle took too long to answer. Please try again."
                 let result = ContentFunctionCallOutput.Create toolCall.callId output
                 createFunctionOutputEvent result |> sendClientEvent conn
-                bus.PostToAgent(Ag_Log $"Document oracle tool call timed out for {toolCall.callId}: {ex.Message}")
+                bus.PostToAgent(Ag_Log $"Oracle tool call timed out for {toolCall.callId}: {ex.Message}")
                 bus.PostToAgent(Ag_ToolCallOutputReady(toolCall.callId, output))
         }
 

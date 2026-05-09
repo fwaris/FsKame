@@ -14,6 +14,9 @@ module PdfSourcesView =
     let private canMutateDocuments model =
         not model.isBusy && not (isRealtimeActive model)
 
+    let private canChangeSourceSelection model =
+        not model.isBusy && not (isRealtimeActive model)
+
     let private addPdfButton model =
         Button("+", PickPdfs)
             .font(size = 28., attributes = FontAttributes.Bold)
@@ -48,7 +51,7 @@ module PdfSourcesView =
             .strokeThickness(1.)
             .strokeShape (RoundRectangle(CornerRadius(8.)))
 
-    let private row canMutateDocuments (doc: PdfDocumentSource) =
+    let private row canMutateDocuments canChangeSourceSelection (doc: PdfDocumentSource) =
         Border(
             (Grid(
                 [ Dimension.Absolute 42.
@@ -58,7 +61,7 @@ module PdfSourcesView =
                 [ Dimension.Absolute 28.; Dimension.Absolute 28. ]
             ) {
                 CheckBox(doc.selected, fun selected -> PdfSelectionChanged(doc.id, selected))
-                    .isEnabled(canMutateDocuments && PdfDocuments.canSelect doc)
+                    .isEnabled(canChangeSourceSelection && PdfDocuments.canSelect doc)
                     .centerVertical()
                     .gridRowSpan(2)
                     .gridColumn (0)
@@ -98,6 +101,7 @@ module PdfSourcesView =
 
     let view model =
         let canMutateDocuments = canMutateDocuments model
+        let canChangeSourceSelection = canChangeSourceSelection model
 
         Border(
             (Grid([ Dimension.Star ], [ Dimension.Absolute 44.; Dimension.Star ]) {
@@ -109,7 +113,7 @@ module PdfSourcesView =
                 if List.isEmpty model.pdfDocuments then
                     emptyView.gridRow (1)
                 else
-                    (CollectionView (model.pdfDocuments) (row canMutateDocuments)).gridRow (1)
+                    (CollectionView (model.pdfDocuments) (row canMutateDocuments canChangeSourceSelection)).gridRow (1)
 
                 (addPdfButton model).gridRow (1)
             })

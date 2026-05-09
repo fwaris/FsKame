@@ -142,6 +142,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsKame.Tools\FsKame.Tools.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Fabulous.MauiControls" />
     <PackageReference Include="FsAICore" />
     <PackageReference Include="FSharp.Control.AsyncSeq" />

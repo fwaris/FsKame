@@ -2,6 +2,7 @@ module FsKame.Tests
 
 open Xunit
 open System
+open System.Collections.Concurrent
 open System.Threading
 open System.Threading.Tasks
 open System.Collections.Generic
@@ -95,6 +96,20 @@ let ``getSynonyms handles empty query`` () =
         Assert.True(Option.isNone expansion)
     }
     |> Async.RunSynchronously
+
+[<Fact>]
+let ``tool loader includes current time tool from tools project`` () =
+    let context = ToolHostContext(ignore, ConcurrentQueue<MemoryCard>())
+    let missingProviderFolder = System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid().ToString("N"))
+    let catalog = ToolLoader.load context missingProviderFolder
+
+    let hasCurrentTimeTool =
+        catalog.plugins
+        |> List.exists (fun plugin ->
+            plugin.Name = "FsKameTools"
+            && (plugin |> Seq.exists (fun fn -> fn.Name = "current_time")))
+
+    Assert.True(hasCurrentTimeTool)
 
 [<Fact>]
 let ``rank promotes exact section target over lexical distractors`` () =
