@@ -23,7 +23,7 @@ module StateMachine =
     let private startAgents ss =
         async {
             AppAgent.start ss.mailbox ss.bus
-            MemoryAgent.start ss.bus ss.toolHostContext ss.toolCatalog
+            MemoryAgent.start ss.apiKey ss.oracleModel ss.bus ss.toolHostContext ss.toolCatalog
             OracleAgent.start ss.apiKey ss.oracleModel ss.bus
             VoiceAgent.start ss.apiKey ss.conn ss.bus
         }

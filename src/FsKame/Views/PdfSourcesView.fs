@@ -18,18 +18,18 @@ module PdfSourcesView =
         not model.isBusy && not (isRealtimeActive model)
 
     let private addPdfButton model =
-        Button("+", PickPdfs)
-            .font(size = 28., attributes = FontAttributes.Bold)
+        Button(Icons.add, PickPdfs)
+            .font(size = 22., fontFamily = C.FONT_SYMBOLS)
             .background(Colors.Magenta)
             .textColor(Colors.White)
-            .cornerRadius(28)
-            .width(56.)
-            .height(56.)
+            .cornerRadius(17)
+            .width(34.)
+            .height(34.)
             .padding(0.)
+            .margin(0,-2,2,0)
             .isEnabled(canMutateDocuments model)
             .alignEndHorizontal()
-            .alignEndVertical()
-            .margin (0., 0., 10., 10.)
+            .centerVertical ()
 
     let private statusColor doc =
         match doc.status with
@@ -104,18 +104,21 @@ module PdfSourcesView =
         let canChangeSourceSelection = canChangeSourceSelection model
 
         Border(
-            (Grid([ Dimension.Star ], [ Dimension.Absolute 44.; Dimension.Star ]) {
+            (Grid([ Dimension.Star; Dimension.Absolute 40. ], [ Dimension.Absolute 44.; Dimension.Star ]) {
                 Label("Document Sources")
                     .font(size = 15., attributes = FontAttributes.Bold)
                     .centerVertical()
+                    .gridColumn(0)
                     .gridRow (0)
 
-                if List.isEmpty model.pdfDocuments then
-                    emptyView.gridRow (1)
-                else
-                    (CollectionView (model.pdfDocuments) (row canMutateDocuments canChangeSourceSelection)).gridRow (1)
+                (addPdfButton model).gridColumn(1).gridRow (0)
 
-                (addPdfButton model).gridRow (1)
+                if List.isEmpty model.pdfDocuments then
+                    emptyView.gridColumnSpan(2).gridRow (1)
+                else
+                    (CollectionView (model.pdfDocuments) (row canMutateDocuments canChangeSourceSelection))
+                        .gridColumnSpan(2)
+                        .gridRow (1)
             })
                 .padding (10.)
         )

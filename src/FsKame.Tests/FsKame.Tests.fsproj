@@ -5,6 +5,11 @@
     <IsPackable>false</IsPackable>
     <UseMaui>true</UseMaui>
     <EnableResizetizer>false</EnableResizetizer>
+    <EnableDefaultMauiItems>false</EnableDefaultMauiItems>
+    <EnableMauiImageProcessing>false</EnableMauiImageProcessing>
+    <EnableMauiSplashScreenProcessing>false</EnableMauiSplashScreenProcessing>
+    <EnableMauiAssetProcessing>false</EnableMauiAssetProcessing>
+    <EnableMauiFontProcessing>false</EnableMauiFontProcessing>
     <ApplicationId>com.companyname.fskame.tests</ApplicationId>
   </PropertyGroup>
 

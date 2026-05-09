@@ -151,6 +151,146 @@ module KnowledgeSources =
             |> List.sortByDescending (fun (c: SourceChunk) -> c.score, c.text.Length * -1)
             |> List.truncate maxResults
 
+    let private sourceKey (source: KnowledgeSource) = source.location.ToLowerInvariant()
+
+    let private chunkKey (chunk: SourceChunk) = sourceKey chunk.source, chunk.index
+
+    let private sourceEquals (left: KnowledgeSource) (right: KnowledgeSource) =
+        String.Equals(left.location, right.location, StringComparison.OrdinalIgnoreCase)
+
+    let private distinctChunks chunks =
+        chunks
+        |> List.fold
+            (fun (seen, kept) chunk ->
+                let key = chunkKey chunk
+
+                if Set.contains key seen then
+                    seen, kept
+                else
+                    Set.add key seen, chunk :: kept)
+            (Set.empty, [])
+        |> snd
+        |> List.rev
+
+    let private sourceCoverageTerms =
+        [ "both"
+          "each"
+          "all"
+          "documents"
+          "document"
+          "docs"
+          "papers"
+          "sources"
+          "selected"
+          "compare"
+          "contrast"
+          "summarize"
+          "summarise"
+          "summary"
+          "them"
+          "these" ]
+
+    let private representativeTerms =
+        [ "this"
+          "it"
+          "overview"
+          "about"
+          "gist"
+          "abstract"
+          "introduction"
+          "main"
+          "points" ]
+
+    let private representativePhrases =
+        [ "main point"
+          "main points"
+          "high level"
+          "high-level"
+          "what is this"
+          "what are these"
+          "what does this"
+          "what do these" ]
+
+    let private queryHasAnyTerm (terms: string list) (query: string) =
+        let queryTerms = Text.terms query |> Set.ofList
+
+        terms |> List.exists (fun term -> queryTerms.Contains(term.ToLowerInvariant()))
+
+    let private queryHasAnyPhrase (phrases: string list) (query: string) =
+        let lower = query.ToLowerInvariant()
+
+        phrases |> List.exists (fun phrase -> lower.Contains(phrase))
+
+    let private needsSourceCoverage (query: string) (queryType: QueryType) (sourceCount: int) =
+        sourceCount > 1
+        && (queryType = QueryType.SectionRetrieval
+            || queryHasAnyTerm sourceCoverageTerms query
+            || queryHasAnyPhrase representativePhrases query)
+
+    let private needsRepresentativeContext (query: string) (queryType: QueryType) (sourceCount: int) =
+        sourceCount > 0
+        && (queryType = QueryType.SectionRetrieval
+            || queryHasAnyTerm (sourceCoverageTerms @ representativeTerms) query
+            || queryHasAnyPhrase representativePhrases query)
+
+    let private firstChunkForSource (source: KnowledgeSource) (chunks: SourceChunk list) =
+        chunks
+        |> List.filter (fun chunk -> sourceEquals chunk.source source)
+        |> List.sortBy (fun chunk -> chunk.index)
+        |> List.tryHead
+
+    let private representativeChunks maxResults (retrieval: RetrievalIndex) =
+        let sources = retrieval.sources |> List.filter _.enabled
+
+        let chunksBySource =
+            sources
+            |> List.map (fun source ->
+                retrieval.chunks
+                |> List.filter (fun chunk -> sourceEquals chunk.source source)
+                |> List.sortBy (fun chunk -> chunk.index))
+
+        let maxDepth = chunksBySource |> List.map List.length |> List.fold max 0
+
+        [ for depth in 0 .. maxDepth - 1 do
+              for chunks in chunksBySource do
+                  match chunks |> List.tryItem depth with
+                  | Some chunk ->
+                      yield
+                          { chunk with
+                              score = max chunk.score 0.01f }
+                  | None -> () ]
+        |> List.truncate maxResults
+
+    let private balanceBySource
+        (query: string)
+        (queryType: QueryType)
+        (maxResults: int)
+        (retrieval: RetrievalIndex)
+        (ranked: SourceChunk list)
+        =
+        let sources = retrieval.sources |> List.filter _.enabled
+        let ranked = distinctChunks ranked
+        let representatives = representativeChunks maxResults retrieval
+
+        if maxResults <= 0 then
+            []
+        elif List.isEmpty ranked && needsRepresentativeContext query queryType sources.Length then
+            representatives
+        elif not (needsSourceCoverage query queryType sources.Length) then
+            ranked |> List.truncate maxResults
+        else
+            let coverage =
+                sources
+                |> List.choose (fun source ->
+                    ranked
+                    |> List.tryFind (fun chunk -> sourceEquals chunk.source source)
+                    |> Option.orElse (firstChunkForSource source retrieval.chunks))
+                |> List.truncate maxResults
+
+            coverage @ ranked @ representatives
+            |> distinctChunks
+            |> List.truncate maxResults
+
     let private applySectionBoost sectionName (chunks: SourceChunk list) =
         match sectionName with
         | None -> chunks
@@ -428,7 +568,7 @@ Query: {query}
                 retrieval.chunks
                 |> rankLexically lexicalQuery lexicalMaxResults
                 |> applySectionBoost sectionName
-                |> List.truncate maxResults
+                |> balanceBySource query queryType maxResults retrieval
 
             match retrieval.encoder, retrieval.colbertIndices with
             | Some encoder, indices when not (List.isEmpty indices) ->
@@ -462,10 +602,9 @@ Query: {query}
                         allHits
                         |> Array.collect (List.toArray >> Array.map (hitToChunk retrieval.sources))
                         |> Array.sortByDescending (fun c -> c.score)
-                        |> Array.truncate rawMaxResults
                         |> Array.toList
                         |> applySectionBoost sectionName
-                        |> List.truncate maxResults
+                        |> balanceBySource query queryType maxResults retrieval
 
                     if logChunks then
                         for chunk in context do

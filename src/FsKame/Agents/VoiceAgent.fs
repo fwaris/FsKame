@@ -89,6 +89,7 @@ Allowed direct actions:
 Tool use:
 - For every question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
 - Pass the user's request as the `question` argument.
+- When you call QUERY_ORACLE, also pass compact advisory judgement fields when you can: turn_kind, topic_continuity, memory_need, tool_need, oracle_need, latency_class, confidence, memory_mutation, sensitive, and conflict_likely. These are hints only; the backend validates them.
 - Do not refuse a request just because it is not about documents or selected sources.
 - Do not invent tool results, source details, page contents, citations, live values, or app state.
 
@@ -105,13 +106,63 @@ After QUERY_ORACLE returns:
             parameters =
                 { Parameters.Default with
                     properties =
-                        Map.ofList
-                            [ "question",
-                              JsProperty.String
-                                  { description =
-                                      Some
-                                          "The user's question or follow-up, rewritten as a concise standalone request."
-                                    enum = None } ]
+                        [ "question",
+                          JsProperty.String
+                              { description =
+                                  Some "The user's question or follow-up, rewritten as a concise standalone request."
+                                enum = None }
+                          "turn_kind",
+                          JsProperty.String
+                              { description =
+                                  Some
+                                      "Advisory turn kind, such as acknowledgement, simple_question, followup_question, topic_shift, correction, or memory_mutation."
+                                enum = None }
+                          "topic_continuity",
+                          JsProperty.String
+                              { description =
+                                  Some "Advisory topic continuity: same_topic, topic_shift, older_topic, or unknown."
+                                enum = None }
+                          "memory_need",
+                          JsProperty.String
+                              { description =
+                                  Some
+                                      "Advisory memory need: none, active_topic_packet, typed_recall, writeback, forget, or unknown."
+                                enum = None }
+                          "tool_need",
+                          JsProperty.String
+                              { description =
+                                  Some
+                                      "Advisory tool need: none, selected_sources, live_tool, durable_memory, or unknown."
+                                enum = None }
+                          "oracle_need",
+                          JsProperty.String
+                              { description =
+                                  Some
+                                      "Advisory oracle need: direct, answer_from_memory_context, answer_from_tools, synthesize, or unknown."
+                                enum = None }
+                          "latency_class",
+                          JsProperty.String
+                              { description = Some "Advisory latency class: fast, medium, slow, or unknown."
+                                enum = None }
+                          "confidence",
+                          JsProperty.String
+                              { description = Some "Advisory confidence from 0.0 to 1.0."
+                                enum = None }
+                          "memory_mutation",
+                          JsProperty.String
+                              { description =
+                                  Some "true when the user asks to remember, forget, correct, or modify memory."
+                                enum = None }
+                          "sensitive",
+                          JsProperty.String
+                              { description = Some "true when sensitive or secret information appears involved."
+                                enum = None }
+                          "conflict_likely",
+                          JsProperty.String
+                              { description =
+                                  Some "true when the turn appears to correct or contradict existing memory."
+                                enum = None } ]
+                        |> Map.ofList
                     required = [ "question" ] } }
 
     let private updateSession (session: Session) =
@@ -138,10 +189,22 @@ After QUERY_ORACLE returns:
             session = updateSession session }
         |> ClientEvent.SessionUpdate
 
-    let private responseCreateEvent (responseInstructions: string) =
+    let private oracleAnswerInput answer =
+        { ContentMessage.Default with
+            role = "user"
+            content =
+                [ MessageContent.Input_text
+                      {| text = $"Oracle answer to speak exactly, without adding facts:\n\n{answer}" |} ] }
+        |> ConversationItem.Message
+
+    let private responseCreateEvent (responseInstructions: string) (input: ConversationItem list option) =
         let response =
             { Response.Default with
                 instructions = Include(Some responseInstructions)
+                input =
+                    match input with
+                    | Some items -> Include(Some items)
+                    | None -> Skip
                 output_modalities = Include(Some [ "audio" ]) }
 
         { ResponseCreate.Default with
@@ -177,9 +240,10 @@ After QUERY_ORACLE returns:
           isFinal = isFinal
           receivedAt = DateTimeOffset.UtcNow }
 
-    let private createMemoryRequest snapshot cancellationToken =
+    let private createMemoryRequest snapshot realtimeJudgement cancellationToken =
         { requestId = Utils.newId ()
           snapshot = snapshot
+          realtimeJudgement = realtimeJudgement
           deadline = DateTimeOffset.UtcNow + MEMORY_REQUEST_TIMEOUT
           cancellationToken = cancellationToken
           completion = TaskCompletionSource<MemoryContext>(TaskCreationOptions.RunContinuationsAsynchronously) }
@@ -189,17 +253,19 @@ After QUERY_ORACLE returns:
         | ActiveResponse _ -> true
         | NoActiveResponse -> false
 
-    let private speakToolResultInstructions text =
-        $"The oracle tool returned this grounded answer. Speak it to the user naturally and briefly. Do not add facts or reinterpret it.\n\n{text}"
+    let private speakToolResultInstructions =
+        "Speak the provided oracle answer naturally and briefly. Do not add facts, omit caveats, or reinterpret it. If the answer contains a refusal or uncertainty, preserve that."
 
     let private tryScheduleSpeak (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
         | Silent, NoActiveResponse, text :: remaining ->
-            responseCreateEvent (speakToolResultInstructions text)
+            responseCreateEvent speakToolResultInstructions (Some [ oracleAnswerInput text ])
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
-            st.bus.PostToAgent(Ag_Log "Realtime response requested from oracle tool output.")
+            st.bus.PostToAgent(
+                Ag_Log $"Realtime response requested from oracle tool output; output_chars={text.Length}."
+            )
 
             { st with
                 responseCreatedState = ActiveResponse {| id = None |}
@@ -233,8 +299,80 @@ After QUERY_ORACLE returns:
             with _ ->
                 content
 
+    let private tryJsonString (root: JsonElement) (name: string) =
+        let mutable prop = Unchecked.defaultof<JsonElement>
+
+        if root.TryGetProperty(name, &prop) then
+            match prop.ValueKind with
+            | JsonValueKind.String -> prop.GetString() |> Option.ofObj |> Option.bind FsKame.Text.notEmpty
+            | JsonValueKind.Number -> Some(prop.GetRawText())
+            | JsonValueKind.True -> Some "true"
+            | JsonValueKind.False -> Some "false"
+            | _ -> None
+        else
+            None
+
+    let private tryJsonBool (root: JsonElement) name =
+        tryJsonString root name
+        |> Option.exists (fun value ->
+            String.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || String.Equals(value, "yes", StringComparison.OrdinalIgnoreCase)
+            || value = "1")
+
+    let private tryJsonFloat (root: JsonElement) name =
+        tryJsonString root name
+        |> Option.bind (fun value ->
+            match Double.TryParse value with
+            | true, parsed -> Some parsed
+            | false, _ -> None)
+
+    let private tryRealtimeJudgement (content: string) =
+        try
+            use doc = JsonDocument.Parse(content)
+
+            let root =
+                let mutable nested = Unchecked.defaultof<JsonElement>
+
+                if doc.RootElement.TryGetProperty("realtime_judgement", &nested) then
+                    nested
+                else
+                    doc.RootElement
+
+            let hasAnyHint =
+                [ "turn_kind"
+                  "topic_continuity"
+                  "memory_need"
+                  "tool_need"
+                  "oracle_need"
+                  "latency_class"
+                  "confidence"
+                  "memory_mutation"
+                  "sensitive"
+                  "conflict_likely" ]
+                |> List.exists (fun name -> tryJsonString root name |> Option.isSome)
+
+            if not hasAnyHint then
+                None
+            else
+                Some
+                    { turnKind = tryJsonString root "turn_kind"
+                      topicContinuity = tryJsonString root "topic_continuity"
+                      memoryNeed = tryJsonString root "memory_need"
+                      toolNeed = tryJsonString root "tool_need"
+                      oracleNeed = tryJsonString root "oracle_need"
+                      latencyClass = tryJsonString root "latency_class"
+                      suggestedFiller = tryJsonString root "suggested_filler"
+                      confidence = tryJsonFloat root "confidence" |> Option.defaultValue 0.5
+                      riskFlags =
+                        { memoryMutation = tryJsonBool root "memory_mutation"
+                          sensitive = tryJsonBool root "sensitive"
+                          conflictLikely = tryJsonBool root "conflict_likely" } }
+        with _ ->
+            None
+
     let private dispatchToolCall (st: VoiceState) (fc: ContentFunctionCall) =
         let question = toolQuestion fc.arguments
+        let realtimeJudgement = tryRealtimeJudgement fc.arguments
 
         let question =
             if String.IsNullOrWhiteSpace question then
@@ -243,7 +381,7 @@ After QUERY_ORACLE returns:
                 question
 
         match fc.name with
-        | ToolNames.QUERY_ORACLE  ->
+        | ToolNames.QUERY_ORACLE ->
             let revision, snapshot = makeTranscriptSnapshot st fc.call_id question true
             let cancellation = new CancellationTokenSource()
             cancellation.CancelAfter FUNCTION_CALL_TIMEOUT
@@ -257,10 +395,16 @@ After QUERY_ORACLE returns:
                   task =
                     TaskCompletionSource<ContentFunctionCallOutput>(TaskCreationOptions.RunContinuationsAsynchronously) }
 
-            let memoryRequest = createMemoryRequest snapshot cancellation.Token
+            let memoryRequest =
+                createMemoryRequest snapshot realtimeJudgement cancellation.Token
 
             enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY (AwaitToolCall call)
-            st.bus.PostToAgent(Ag_Log $"Oracle tool call started: {question}")
+
+            st.bus.PostToAgent(
+                Ag_Log
+                    $"Oracle tool call started: question_chars={question.Length} args_chars={fc.arguments.Length} question='{FsKame.Text.truncate 120 question}'"
+            )
+
             st.bus.PostToAgent(Ag_TranscriptUpdated snapshot)
             st.bus.PostToAgent(Ag_MemoryRequested memoryRequest)
 
@@ -323,7 +467,7 @@ After QUERY_ORACLE returns:
         if String.IsNullOrWhiteSpace output then
             st
         else
-            st.bus.PostToAgent(Ag_Log $"Oracle tool output ready for call {callId}.")
+            st.bus.PostToAgent(Ag_Log $"Oracle tool output ready for call {callId}; output_chars={output.Length}.")
 
             { st with
                 pendingSpeakTexts = st.pendingSpeakTexts @ [ output ] }

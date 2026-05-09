@@ -14,6 +14,7 @@ open Microsoft.SemanticKernel
 
 type ToolHostContext(report: string -> unit, blackboard: ConcurrentQueue<MemoryCard>) =
     member val Retrieval = KnowledgeSources.emptyIndex with get, set
+    member val MemoryStore = DurableMemory.empty None with get, set
     member val LogExpansions = false with get, set
     member val LogChunks = false with get, set
     member val UseLexicalFilter = true with get, set
@@ -30,6 +31,30 @@ type ToolHostContext(report: string -> unit, blackboard: ConcurrentQueue<MemoryC
             question
             maxResults
             this.Retrieval
+
+    member this.RecallDurableMemory(question: string, maxResults: int) =
+        let maxResults = if maxResults <= 0 then 12 else min maxResults 60
+
+        let budget = if maxResults <= 20 then Fast else Medium
+
+        let spec =
+            { query = question |> FsKame.Text.normalizeWhitespace
+              kinds = [ Directive; Decision; Claim; Commitment; Episode ]
+              scopes = [ Session; User; Workspace; Global ]
+              namespaceId = DurableMemory.defaultNamespace
+              temporalMode = CurrentOnly
+              temporalReference = None
+              includeSuperseded = false
+              recallBudget = budget
+              maxCandidates = maxResults
+              minScore = None
+              latencyBudget =
+                if budget = Fast then
+                    TimeSpan.FromMilliseconds 90.
+                else
+                    TimeSpan.FromMilliseconds 180. }
+
+        DurableMemory.recall this.Retrieval.encoder spec this.MemoryStore
 
 type IToolProvider =
     abstract ContractVersion: int
@@ -85,6 +110,20 @@ type BlackboardSearchTool(context: ToolHostContext) =
             |> Array.mapi (fun index card -> $"[{index + 1}] {card.kind}: {card.title}\n{card.content}")
             |> String.concat "\n\n"
 
+type DurableMemorySearchTool(context: ToolHostContext) =
+    [<KernelFunction("durable_memory_search")>]
+    [<Description("Searches typed durable memory records: directive, claim, decision, commitment, and episode.")>]
+    member _.Search
+        (
+            [<Description("The user's question or standalone memory search query.")>] query: string,
+            [<Description("The maximum number of durable memory records to return.")>] maxResults: int
+        ) =
+        task {
+            let maxResults = if maxResults <= 0 then 12 else min maxResults 30
+            let! hits = context.RecallDurableMemory(query, maxResults) |> Async.StartAsTask
+            return DurableMemory.renderRecall hits
+        }
+
 module ToolLoader =
     let contractVersion = 1
 
@@ -95,6 +134,7 @@ module ToolLoader =
         [ typeof<SelectedSourceSearchTool>
           typeof<SourceInventoryTool>
           typeof<BlackboardSearchTool>
+          typeof<DurableMemorySearchTool>
           typeof<CurrentTimeTool> ]
 
     let private ctorAcceptsContext (toolType: Type) =

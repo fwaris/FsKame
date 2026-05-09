@@ -66,6 +66,7 @@
     <Compile Include="WorkFlowTypes.fs" />
     <Compile Include="Audio.fs" />
     <Compile Include="KnowledgeSources.fs" />
+    <Compile Include="DurableMemory.fs" />
     <Compile Include="Tooling.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="PdfLibrary.fs" />
