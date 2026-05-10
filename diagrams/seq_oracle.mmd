@@ -1,6 +1,6 @@
 sequenceDiagram
     participant User
-    participant Voice as VoiceAgent<br/>gpt-realtime
+    participant Voice as VoiceAgent<br/>gpt-realtime-2
     participant Bus as AgentBus
     participant Source as SourceAgent
     participant Oracle as OracleAgent
@@ -25,5 +25,4 @@ sequenceDiagram
     Bus-->>Voice: Guided response ready
 
     Voice->>Voice: Build response.create instructions<br/>with oracle guidance + source note
-    Voice->>User: Speaks final answer via gpt-realtime audio
-
+    Voice->>User: Speaks final answer via gpt-realtime-2 audio

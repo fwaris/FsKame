@@ -166,11 +166,8 @@ type RiskFlags =
 type RealtimeJudgement =
     { turnKind: string option
       topicContinuity: string option
-      memoryNeed: string option
-      toolNeed: string option
-      oracleNeed: string option
-      latencyClass: string option
-      suggestedFiller: string option
+      memoryAction: string option
+      needsExternalContext: bool option
       confidence: float
       riskFlags: RiskFlags }
 

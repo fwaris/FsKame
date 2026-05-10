@@ -555,8 +555,7 @@ module DurableMemory =
                 accepted
                 && (j.topicContinuity
                     |> Option.exists (fun value -> stringEquals value "same_topic"))
-                && (j.memoryNeed
-                    |> Option.exists (fun value -> stringEquals value "active_topic_packet"))
+                && (j.needsExternalContext |> Option.exists not)
                 ->
                 Fast, ZeroController, "Accepted low-risk realtime same-topic judgement; using fast typed recall."
             | _ when risk.memoryMutation || risk.sensitive || risk.conflictLikely ->

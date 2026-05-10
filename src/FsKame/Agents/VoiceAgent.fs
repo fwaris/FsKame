@@ -89,7 +89,7 @@ Allowed direct actions:
 Tool use:
 - For every question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
 - Pass the user's request as the `question` argument.
-- When you call QUERY_ORACLE, also pass compact advisory judgement fields when you can: turn_kind, topic_continuity, memory_need, tool_need, oracle_need, latency_class, confidence, memory_mutation, sensitive, and conflict_likely. These are hints only; the backend validates them.
+- When you call QUERY_ORACLE, you may pass compact advisory hints only when they are clear from the user's words and recent conversation: turn_kind, topic_continuity, memory_action, needs_external_context, sensitive, and confidence. These are hints only; the backend validates them and decides memory/tool/oracle handling.
 - Do not refuse a request just because it is not about documents or selected sources.
 - Do not invent tool results, source details, page contents, citations, live values, or app state.
 
@@ -115,53 +115,34 @@ After QUERY_ORACLE returns:
                           JsProperty.String
                               { description =
                                   Some
-                                      "Advisory turn kind, such as acknowledgement, simple_question, followup_question, topic_shift, correction, or memory_mutation."
+                                      "Advisory turn kind from the utterance: acknowledgement, question, followup, topic_shift, correction, summary, comparison, or memory_request."
                                 enum = None }
                           "topic_continuity",
                           JsProperty.String
                               { description =
-                                  Some "Advisory topic continuity: same_topic, topic_shift, older_topic, or unknown."
+                                  Some
+                                      "Advisory topic continuity from recent conversation only: same_topic, topic_shift, older_topic, or unknown."
                                 enum = None }
-                          "memory_need",
+                          "memory_action",
                           JsProperty.String
                               { description =
                                   Some
-                                      "Advisory memory need: none, active_topic_packet, typed_recall, writeback, forget, or unknown."
+                                      "Advisory explicit memory action requested by the user: none, remember, forget, correct, or unknown."
                                 enum = None }
-                          "tool_need",
-                          JsProperty.String
+                          "needs_external_context",
+                          JsProperty.Boolean
                               { description =
                                   Some
-                                      "Advisory tool need: none, selected_sources, live_tool, durable_memory, or unknown."
-                                enum = None }
-                          "oracle_need",
-                          JsProperty.String
-                              { description =
-                                  Some
-                                      "Advisory oracle need: direct, answer_from_memory_context, answer_from_tools, synthesize, or unknown."
-                                enum = None }
-                          "latency_class",
-                          JsProperty.String
-                              { description = Some "Advisory latency class: fast, medium, slow, or unknown."
-                                enum = None }
+                                      "True when the user appears to ask for documents, tools, current facts, app state, memory, comparison, or summary beyond casual chat." }
                           "confidence",
                           JsProperty.String
                               { description = Some "Advisory confidence from 0.0 to 1.0."
                                 enum = None }
-                          "memory_mutation",
-                          JsProperty.String
-                              { description =
-                                  Some "true when the user asks to remember, forget, correct, or modify memory."
-                                enum = None }
                           "sensitive",
-                          JsProperty.String
-                              { description = Some "true when sensitive or secret information appears involved."
-                                enum = None }
-                          "conflict_likely",
-                          JsProperty.String
+                          JsProperty.Boolean
                               { description =
-                                  Some "true when the turn appears to correct or contradict existing memory."
-                                enum = None } ]
+                                  Some
+                                      "True when the utterance includes secrets, credentials, private identifiers, or sensitive personal data." } ]
                         |> Map.ofList
                     required = [ "question" ] } }
 
@@ -319,12 +300,58 @@ After QUERY_ORACLE returns:
             || String.Equals(value, "yes", StringComparison.OrdinalIgnoreCase)
             || value = "1")
 
+    let private tryJsonBoolOption (root: JsonElement) name =
+        tryJsonString root name
+        |> Option.bind (fun value ->
+            if
+                String.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(value, "yes", StringComparison.OrdinalIgnoreCase)
+                || value = "1"
+            then
+                Some true
+            elif
+                String.Equals(value, "false", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(value, "no", StringComparison.OrdinalIgnoreCase)
+                || value = "0"
+            then
+                Some false
+            else
+                None)
+
     let private tryJsonFloat (root: JsonElement) name =
         tryJsonString root name
         |> Option.bind (fun value ->
             match Double.TryParse value with
             | true, parsed -> Some parsed
             | false, _ -> None)
+
+    let private stringIsAny values value =
+        values
+        |> List.exists (fun candidate -> String.Equals(candidate, value, StringComparison.OrdinalIgnoreCase))
+
+    let private memoryActionFromLegacy (root: JsonElement) =
+        match tryJsonString root "memory_need" with
+        | Some value when stringIsAny [ "writeback"; "remember"; "typed_recall" ] value -> Some "remember"
+        | Some value when stringIsAny [ "forget"; "delete" ] value -> Some "forget"
+        | Some value when stringIsAny [ "correct"; "correction" ] value -> Some "correct"
+        | _ -> None
+
+    let private needsExternalContextFromLegacy (root: JsonElement) =
+        match tryJsonString root "tool_need" with
+        | Some value when stringIsAny [ "none"; "unknown" ] value -> Some false
+        | Some _ -> Some true
+        | None -> None
+
+    let private isMemoryMutationAction =
+        function
+        | Some value when stringIsAny [ "remember"; "forget"; "correct" ] value -> true
+        | _ -> false
+
+    let private isCorrectionTurn turnKind memoryAction =
+        match turnKind, memoryAction with
+        | Some value, _ when stringIsAny [ "correction"; "correct" ] value -> true
+        | _, Some value when stringIsAny [ "correct"; "forget" ] value -> true
+        | _ -> false
 
     let private tryRealtimeJudgement (content: string) =
         try
@@ -341,32 +368,48 @@ After QUERY_ORACLE returns:
             let hasAnyHint =
                 [ "turn_kind"
                   "topic_continuity"
+                  "memory_action"
+                  "needs_external_context"
+                  "confidence"
+                  "sensitive"
+                  // Backward-compatible parse for old realtime sessions.
                   "memory_need"
                   "tool_need"
-                  "oracle_need"
-                  "latency_class"
-                  "confidence"
                   "memory_mutation"
-                  "sensitive"
                   "conflict_likely" ]
                 |> List.exists (fun name -> tryJsonString root name |> Option.isSome)
 
             if not hasAnyHint then
                 None
             else
+                let turnKind = tryJsonString root "turn_kind"
+
+                let memoryAction =
+                    tryJsonString root "memory_action"
+                    |> Option.orElse (memoryActionFromLegacy root)
+
+                let needsExternalContext =
+                    tryJsonBoolOption root "needs_external_context"
+                    |> Option.orElse (needsExternalContextFromLegacy root)
+
+                let sensitive = tryJsonBool root "sensitive"
+
+                let memoryMutation =
+                    tryJsonBool root "memory_mutation" || isMemoryMutationAction memoryAction
+
+                let conflictLikely =
+                    tryJsonBool root "conflict_likely" || isCorrectionTurn turnKind memoryAction
+
                 Some
-                    { turnKind = tryJsonString root "turn_kind"
+                    { turnKind = turnKind
                       topicContinuity = tryJsonString root "topic_continuity"
-                      memoryNeed = tryJsonString root "memory_need"
-                      toolNeed = tryJsonString root "tool_need"
-                      oracleNeed = tryJsonString root "oracle_need"
-                      latencyClass = tryJsonString root "latency_class"
-                      suggestedFiller = tryJsonString root "suggested_filler"
+                      memoryAction = memoryAction
+                      needsExternalContext = needsExternalContext
                       confidence = tryJsonFloat root "confidence" |> Option.defaultValue 0.5
                       riskFlags =
-                        { memoryMutation = tryJsonBool root "memory_mutation"
-                          sensitive = tryJsonBool root "sensitive"
-                          conflictLikely = tryJsonBool root "conflict_likely" } }
+                        { memoryMutation = memoryMutation
+                          sensitive = sensitive
+                          conflictLikely = conflictLikely } }
         with _ ->
             None
 

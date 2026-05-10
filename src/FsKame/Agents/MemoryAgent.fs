@@ -463,17 +463,15 @@ module MemoryAgent =
             | Some hint ->
                 let turnKind = hint.turnKind |> Option.defaultValue "unknown"
                 let topicContinuity = hint.topicContinuity |> Option.defaultValue "unknown"
-                let memoryNeed = hint.memoryNeed |> Option.defaultValue "unknown"
-                let toolNeed = hint.toolNeed |> Option.defaultValue "unknown"
-                let oracleNeed = hint.oracleNeed |> Option.defaultValue "unknown"
-                let latencyClass = hint.latencyClass |> Option.defaultValue "unknown"
+                let memoryAction = hint.memoryAction |> Option.defaultValue "unknown"
+
+                let needsExternalContext =
+                    hint.needsExternalContext |> Option.map string |> Option.defaultValue "unknown"
 
                 [ $"turn_kind={turnKind}"
                   $"topic_continuity={topicContinuity}"
-                  $"memory_need={memoryNeed}"
-                  $"tool_need={toolNeed}"
-                  $"oracle_need={oracleNeed}"
-                  $"latency_class={latencyClass}"
+                  $"memory_action={memoryAction}"
+                  $"needs_external_context={needsExternalContext}"
                   $"confidence={hint.confidence:F2}"
                   $"memory_mutation={hint.riskFlags.memoryMutation}"
                   $"sensitive={hint.riskFlags.sensitive}"
