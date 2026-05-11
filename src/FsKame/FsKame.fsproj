@@ -57,7 +57,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Constants.fs" />
     <Compile Include="Icons.fs" />
     <Compile Include="Log.fs" />

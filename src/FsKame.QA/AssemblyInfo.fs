@@ -1,4 +1,4 @@
-namespace FsKame
+namespace FsKame.QA
 
 open System.Runtime.CompilerServices
 

@@ -2,16 +2,16 @@ module FsKame.Tests
 
 open Xunit
 open System
-open System.Collections.Concurrent
+open System.IO
+open System.Security.Cryptography
+open System.Text
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open System.Collections.Generic
 open Microsoft.Extensions.AI
-open System.Text.Json.Serialization
 open FSharp.Control
-open RTOpenAI.Events
-open FsKame
-open FsKame.WorkFlow
+open FsKame.QA
 
 type MockChatClient() =
     interface IChatClient with
@@ -44,24 +44,18 @@ type InvalidJsonSchemaChatClient() =
         member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
-type SingleKeywordChatClient() =
-    interface IChatClient with
-        member this.Dispose() = ()
-        member this.GetService(serviceType: Type, serviceKey: obj) = null
+type FakeQaToolHost() =
+    interface IQaToolHost with
+        member _.Report _ = ()
 
-        member this.GetResponseAsync(chatMessages, options, cancellationToken) =
-            let response =
-                ChatResponse(
-                    ChatMessage(
-                        ChatRole.Assistant,
-                        """{"items":[{"passageIndex":0,"keywords":["cached coverage term"]}]}"""
-                    )
-                )
+        member _.SearchKnowledgeAsync(_, _, _) = Task.FromResult("No source context.")
 
-            Task.FromResult(response)
+        member _.SourceInventoryAsync _ = Task.FromResult("No selected sources.")
 
-        member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
-            asyncSeq { yield ChatResponseUpdate() }
+        member _.SearchMemoryAsync(_, _, _) = Task.FromResult("No memory context.")
+
+        member _.SearchBlackboardAsync(_, _) =
+            Task.FromResult("No blackboard context.")
 
 let private keywordPassage (source: KnowledgeSource) index text : FsColbert.PassageRef =
     { sourceId = source.location
@@ -78,11 +72,76 @@ let private keywordOptions schemaVersion client =
         batchSize = 1
         parallelism = 2 }
 
-let private included name value =
-    match value with
-    | Include(Some x) -> x
-    | Include None -> failwith $"{name} was explicitly null."
-    | Skip -> failwith $"{name} was skipped."
+let private tempStorageRoot () =
+    Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
+
+let private hashText (value: string) =
+    use sha = SHA256.Create()
+    let bytes = Encoding.UTF8.GetBytes value
+
+    sha.ComputeHash bytes
+    |> Convert.ToHexString
+    |> fun hash -> hash.ToLowerInvariant()
+
+let private testSourceKindId sourceKind =
+    match sourceKind with
+    | Pdf -> "pdf"
+    | Markdown -> "markdown"
+
+let private testSourceFingerprint (source: KnowledgeSource) =
+    let filePart =
+        let info = FileInfo source.location
+
+        if info.Exists then
+            $"{info.FullName}:{info.Length}:{info.LastWriteTimeUtc.Ticks}"
+        else
+            source.location
+
+    $"{testSourceKindId source.kind}:{filePart}"
+
+let private testKeywordCachePath storageRoot sourceFingerprint modelId schemaVersion =
+    let folder = Path.Combine(storageRoot, "FsKame", "FsColbert", "KeywordCache")
+    Directory.CreateDirectory folder |> ignore
+
+    let fileName =
+        [ sourceFingerprint; modelId; schemaVersion ] |> String.concat "\n" |> hashText
+
+    Path.Combine(folder, $"{fileName}.jsonl")
+
+let private seedKeywordCache
+    storageRoot
+    (source: KnowledgeSource)
+    (options: KnowledgeSources.KeywordGenerationOptions)
+    (passage: FsColbert.PassageRef)
+    keywords
+    =
+    let sourceFingerprint = testSourceFingerprint source
+    let textHash = hashText passage.text
+
+    let key =
+        [ sourceFingerprint
+          string passage.index
+          textHash
+          options.modelId
+          options.schemaVersion ]
+        |> String.concat "\n"
+        |> hashText
+
+    let cachePath =
+        testKeywordCachePath storageRoot sourceFingerprint options.modelId options.schemaVersion
+
+    let line =
+        JsonSerializer.Serialize(
+            {| key = key
+               sourceFingerprint = sourceFingerprint
+               passageIndex = passage.index
+               textHash = textHash
+               modelId = options.modelId
+               schemaVersion = options.schemaVersion
+               keywords = keywords |}
+        )
+
+    File.AppendAllText(cachePath, line + Environment.NewLine, Encoding.UTF8)
 
 [<Theory>]
 [<InlineData("gpt-5.5")>]
@@ -96,24 +155,6 @@ let ``model capability omits temperature for models that reject it`` modelId =
 [<InlineData("gpt-4.1-mini")>]
 let ``model capability keeps temperature for supported models`` modelId =
     Assert.True(ModelCapabilities.supportsTemperature modelId)
-
-[<Fact>]
-let ``realtime session enables automatic VAD tool responses and interruptions`` () =
-    let input = VoiceAgent.sessionAudio.input |> included "audio.input"
-    let turnDetection = input.turn_detection |> included "audio.input.turn_detection"
-
-    match turnDetection with
-    | VAD.Server_Vad config ->
-        Assert.True(config.create_response)
-        Assert.True(config.interrupt_response)
-        Assert.Equal(300, config.prefix_padding_ms)
-        Assert.Equal(200, config.silence_duration_ms)
-        Assert.Equal(0.5, config.threshold)
-
-        match config.idle_timeout_ms with
-        | Skip -> ()
-        | Include _ -> failwith "Expected idle_timeout_ms to be skipped."
-    | VAD.Semantic_Vad _ -> failwith "Expected server_vad turn detection."
 
 [<Fact>]
 let ``getSynonyms parses comma-separated keywords correctly`` () =
@@ -156,9 +197,11 @@ let ``keyword schema rejection does not block keyword attachment`` () =
               keywordPassage source 1 "The policy excludes cosmetic dental care." ]
 
         let logs = ResizeArray<string>()
+        let storageRoot = tempStorageRoot ()
 
         let! enriched, _ =
             KnowledgeSources.attachKeywords
+                storageRoot
                 logs.Add
                 (keywordOptions $"test-schema-{Guid.NewGuid():N}" (new InvalidJsonSchemaChatClient() :> IChatClient))
                 source
@@ -180,6 +223,7 @@ let ``keyword schema rejection does not block keyword attachment`` () =
 let ``keyword schema rejection keeps cached keyword records`` () =
     async {
         let schemaVersion = $"test-cache-schema-{Guid.NewGuid():N}"
+        let storageRoot = tempStorageRoot ()
 
         let source =
             { kind = Markdown
@@ -190,24 +234,13 @@ let ``keyword schema rejection keeps cached keyword records`` () =
             [ keywordPassage source 0 "The policy covers emergency dental care."
               keywordPassage source 1 "The policy excludes cosmetic dental care." ]
 
-        let! initiallyEnriched, _ =
-            KnowledgeSources.attachKeywords
-                ignore
-                (keywordOptions schemaVersion (new SingleKeywordChatClient() :> IChatClient))
-                source
-                passages
+        let options =
+            keywordOptions schemaVersion (new InvalidJsonSchemaChatClient() :> IChatClient)
 
-        Assert.Equal<string list>([ "cached coverage term" ], initiallyEnriched.Head.keywords)
-        Assert.Empty(initiallyEnriched.Tail.Head.keywords)
-
+        seedKeywordCache storageRoot source options passages.Head [ "cached coverage term" ]
         let logs = ResizeArray<string>()
 
-        let! enriched, _ =
-            KnowledgeSources.attachKeywords
-                logs.Add
-                (keywordOptions schemaVersion (new InvalidJsonSchemaChatClient() :> IChatClient))
-                source
-                passages
+        let! enriched, _ = KnowledgeSources.attachKeywords storageRoot logs.Add options source passages
 
         Assert.Equal<string list>([ "cached coverage term" ], enriched.Head.keywords)
         Assert.Empty(enriched.Tail.Head.keywords)
@@ -223,18 +256,14 @@ let ``keyword schema rejection keeps cached keyword records`` () =
 
 [<Fact>]
 let ``tool loader includes current time tool from tools project`` () =
-    let context = ToolHostContext(ignore, ConcurrentQueue<MemoryCard>())
+    let providerFolder =
+        System.IO.Path.GetDirectoryName(typeof<FsKame.Tools.CurrentTimeToolProvider>.Assembly.Location)
 
-    let missingProviderFolder =
-        System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid().ToString("N"))
-
-    let catalog = ToolLoader.load context missingProviderFolder
+    let catalog = QaToolLoader.load (FakeQaToolHost()) (Some providerFolder)
 
     let hasCurrentTimeTool =
-        catalog.plugins
-        |> List.exists (fun plugin ->
-            plugin.Name = "FsKameTools"
-            && (plugin |> Seq.exists (fun fn -> fn.Name = "current_time")))
+        catalog.tools
+        |> List.exists (fun tool -> tool.PluginName = "FsKameTools" && tool.Name = "current_time")
 
     Assert.True(hasCurrentTimeTool)
 

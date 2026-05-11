@@ -1,26 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0-maccatalyst26.4</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
-    <UseMaui>true</UseMaui>
-    <EnableResizetizer>false</EnableResizetizer>
-    <EnableDefaultMauiItems>false</EnableDefaultMauiItems>
-    <EnableMauiImageProcessing>false</EnableMauiImageProcessing>
-    <EnableMauiSplashScreenProcessing>false</EnableMauiSplashScreenProcessing>
-    <EnableMauiAssetProcessing>false</EnableMauiAssetProcessing>
-    <EnableMauiFontProcessing>false</EnableMauiFontProcessing>
-    <ApplicationId>com.companyname.fskame.tests</ApplicationId>
   </PropertyGroup>
-
-  <Target Name="RemoveMauiItems" BeforeTargets="ResizetizerCollectItems">
-    <ItemGroup>
-      <MauiIcon Remove="@(MauiIcon)" />
-      <MauiImage Remove="@(MauiImage)" />
-      <MauiSplashScreen Remove="@(MauiSplashScreen)" />
-      <MauiAsset Remove="@(MauiAsset)" />
-    </ItemGroup>
-  </Target>
 
   <ItemGroup>
     <Compile Include="Tests.fs" />
@@ -33,11 +16,11 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="Microsoft.Extensions.AI" />
     <PackageReference Include="FSharp.Control.AsyncSeq" />
-    <PackageReference Include="OpenAI" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\FsKame\FsKame.fsproj" />
+    <ProjectReference Include="..\FsKame.QA\FsKame.QA.fsproj" />
+    <ProjectReference Include="..\FsKame.Tools\FsKame.Tools.fsproj" />
   </ItemGroup>
 
 </Project>
