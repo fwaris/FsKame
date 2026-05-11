@@ -1,4 +1,4 @@
-namespace FsKame.WorkFlow
+namespace FsKame.QA
 
 open System
 open System.IO
@@ -6,8 +6,6 @@ open System.Security.Cryptography
 open System.Text
 open System.Text.Json
 open System.Text.RegularExpressions
-open FsKame
-open Microsoft.Maui.Storage
 
 module DurableMemory =
     type Store =
@@ -341,8 +339,8 @@ module DurableMemory =
             kind, max records.Length versionTotal)
         |> Map.ofList
 
-    let private defaultPath () =
-        Path.Combine(FileSystem.AppDataDirectory, "memory", "durable-memory-v1.json")
+    let defaultPath storageRoot =
+        Path.Combine(storageRoot, "memory", "durable-memory-v1.json")
 
     let load (path: string) : Store * string list =
         try
@@ -363,7 +361,7 @@ module DurableMemory =
         with ex ->
             empty (Some path), [ $"Durable memory store could not be loaded: {ex.Message}" ]
 
-    let loadDefault () = load (defaultPath ())
+    let loadDefault storageRoot = load (defaultPath storageRoot)
 
     let private save (store: Store) =
         match store.path with

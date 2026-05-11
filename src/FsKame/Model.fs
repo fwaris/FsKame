@@ -22,6 +22,7 @@ type StartParams =
       logExpansions: bool
       logChunks: bool
       useLexicalFilter: bool
+      elaborateIndexKeywords: bool
       toolCatalog: ToolCatalog }
 
 and Model =
@@ -39,7 +40,8 @@ and Model =
       isBusy: bool
       logExpansions: bool
       logChunks: bool
-      useLexicalFilter: bool }
+      useLexicalFilter: bool
+      elaborateIndexKeywords: bool }
 
 and Msg =
     | OpenAiKeyChanged of string
@@ -68,3 +70,5 @@ and Msg =
     | LogExpansionsToggled of bool
     | LogChunksToggled of bool
     | UseLexicalFilterToggled of bool
+    | ElaborateIndexKeywordsToggled of bool
+    | PrebuiltDocumentsInstalled of Result<PdfDocumentSource list * string list, exn>

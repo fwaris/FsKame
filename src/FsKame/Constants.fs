@@ -8,10 +8,11 @@ module C =
     let SETTINGS_LOG_EXPANSIONS = "FsKame.LogExpansions"
     let SETTINGS_LOG_CHUNKS = "FsKame.LogChunks"
     let SETTINGS_USE_LEXICAL_FILTER = "FsKame.UseLexicalFilter"
+    let SETTINGS_ELABORATE_INDEX_KEYWORDS = "FsKame.ElaborateIndexKeywords"
 
-    let DEFAULT_ORACLE_MODEL = "gpt-5.1"
+    let DEFAULT_ORACLE_MODEL = "gpt-5.5"
     let DEFAULT_REALTIME_MODEL = "gpt-realtime-2"
-    let NANO_MODEL = "gpt-5.4-mini" // "gpt-5.4-nano"
+    let NANO_MODEL = "gpt-5-nano"
     let REALTIME_MEMORY_TIMEOUT_MS = 1200
     let REALTIME_MEMORY_CANDIDATE_CHUNKS = 14
     let REALTIME_MEMORY_MAX_CONTEXT_CHUNKS = 12

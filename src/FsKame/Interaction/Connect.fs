@@ -57,6 +57,7 @@ module Connect =
                                 parms.logExpansions
                                 parms.logChunks
                                 parms.useLexicalFilter
+                                parms.elaborateIndexKeywords
 
                         flow.PostToFlow Fl_Start
 

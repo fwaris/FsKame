@@ -39,6 +39,7 @@ module MemoryAgent =
           logExpansions: bool
           logChunks: bool
           useLexicalFilter: bool
+          elaborateIndexKeywords: bool
           inFlight: Map<string, MemoryRequest>
           recentContexts: Map<string, MemoryContext> }
 
@@ -77,7 +78,14 @@ module MemoryAgent =
             let! retrieval, errors =
                 match mode with
                 | InternalDocumentIndex -> KnowledgeSources.loadInternalIndex sources
-                | FsColbertWithFallback -> KnowledgeSources.loadIndex report sources
+                | FsColbertWithFallback ->
+                    let keywordOptions =
+                        { KnowledgeSources.KeywordGenerationOptions.defaults with
+                            enabled = st.elaborateIndexKeywords
+                            client = st.smallController
+                            modelId = C.NANO_MODEL }
+
+                    KnowledgeSources.loadIndex report keywordOptions sources
 
             for err in errors do
                 st.bus.PostToAgent(Ag_Log err)
@@ -1549,7 +1557,8 @@ Write only durable, future-useful facts. Use directive for preferences/instructi
                     { st with
                         logExpansions = flags.logExpansions
                         logChunks = flags.logChunks
-                        useLexicalFilter = flags.useLexicalFilter }
+                        useLexicalFilter = flags.useLexicalFilter
+                        elaborateIndexKeywords = flags.elaborateIndexKeywords }
 
                 return! loadSources st mode sources
             | Ag_MemoryRequested request ->
@@ -1612,6 +1621,7 @@ Write only durable, future-useful facts. Use directive for preferences/instructi
               logExpansions = false
               logChunks = false
               useLexicalFilter = true
+              elaborateIndexKeywords = true
               inFlight = Map.empty
               recentContexts = Map.empty }
 

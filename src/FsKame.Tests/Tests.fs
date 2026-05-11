@@ -32,6 +32,52 @@ type MockChatClient() =
         member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
+type InvalidJsonSchemaChatClient() =
+    interface IChatClient with
+        member this.Dispose() = ()
+        member this.GetService(serviceType: Type, serviceKey: obj) = null
+
+        member this.GetResponseAsync(chatMessages, options, cancellationToken) =
+            InvalidOperationException("HTTP 400 invalid_request_error invalid_json_schema: schema type error")
+            |> Task.FromException<ChatResponse>
+
+        member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
+            asyncSeq { yield ChatResponseUpdate() }
+
+type SingleKeywordChatClient() =
+    interface IChatClient with
+        member this.Dispose() = ()
+        member this.GetService(serviceType: Type, serviceKey: obj) = null
+
+        member this.GetResponseAsync(chatMessages, options, cancellationToken) =
+            let response =
+                ChatResponse(
+                    ChatMessage(
+                        ChatRole.Assistant,
+                        """{"items":[{"passageIndex":0,"keywords":["cached coverage term"]}]}"""
+                    )
+                )
+
+            Task.FromResult(response)
+
+        member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
+            asyncSeq { yield ChatResponseUpdate() }
+
+let private keywordPassage (source: KnowledgeSource) index text : FsColbert.PassageRef =
+    { sourceId = source.location
+      sourceDisplayName = source.DisplayName
+      sourceLocation = source.location
+      index = index
+      text = text
+      keywords = [] }
+
+let private keywordOptions schemaVersion client =
+    { KnowledgeSources.KeywordGenerationOptions.defaults with
+        client = Some client
+        schemaVersion = schemaVersion
+        batchSize = 1
+        parallelism = 2 }
+
 let private included name value =
     match value with
     | Include(Some x) -> x
@@ -94,6 +140,84 @@ let ``getSynonyms handles empty query`` () =
         let client = new MockChatClient()
         let! expansion = KnowledgeSources.getSynonyms client None ""
         Assert.True(Option.isNone expansion)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``keyword schema rejection does not block keyword attachment`` () =
+    async {
+        let source =
+            { kind = Markdown
+              location = $"/tmp/schema-reject-{Guid.NewGuid():N}.md"
+              enabled = true }
+
+        let passages =
+            [ keywordPassage source 0 "The policy covers emergency dental care."
+              keywordPassage source 1 "The policy excludes cosmetic dental care." ]
+
+        let logs = ResizeArray<string>()
+
+        let! enriched, _ =
+            KnowledgeSources.attachKeywords
+                logs.Add
+                (keywordOptions $"test-schema-{Guid.NewGuid():N}" (new InvalidJsonSchemaChatClient() :> IChatClient))
+                source
+                passages
+
+        Assert.Equal<int>(2, enriched.Length)
+        Assert.All(enriched, fun passage -> Assert.Empty passage.keywords)
+
+        let schemaRejectionLogs =
+            logs
+            |> Seq.filter (fun log -> log.Contains("Keyword schema was rejected by OpenAI"))
+            |> Seq.length
+
+        Assert.Equal(1, schemaRejectionLogs)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``keyword schema rejection keeps cached keyword records`` () =
+    async {
+        let schemaVersion = $"test-cache-schema-{Guid.NewGuid():N}"
+
+        let source =
+            { kind = Markdown
+              location = $"/tmp/schema-cache-{Guid.NewGuid():N}.md"
+              enabled = true }
+
+        let passages =
+            [ keywordPassage source 0 "The policy covers emergency dental care."
+              keywordPassage source 1 "The policy excludes cosmetic dental care." ]
+
+        let! initiallyEnriched, _ =
+            KnowledgeSources.attachKeywords
+                ignore
+                (keywordOptions schemaVersion (new SingleKeywordChatClient() :> IChatClient))
+                source
+                passages
+
+        Assert.Equal<string list>([ "cached coverage term" ], initiallyEnriched.Head.keywords)
+        Assert.Empty(initiallyEnriched.Tail.Head.keywords)
+
+        let logs = ResizeArray<string>()
+
+        let! enriched, _ =
+            KnowledgeSources.attachKeywords
+                logs.Add
+                (keywordOptions schemaVersion (new InvalidJsonSchemaChatClient() :> IChatClient))
+                source
+                passages
+
+        Assert.Equal<string list>([ "cached coverage term" ], enriched.Head.keywords)
+        Assert.Empty(enriched.Tail.Head.keywords)
+
+        let schemaRejectionLogs =
+            logs
+            |> Seq.filter (fun log -> log.Contains("Keyword schema was rejected by OpenAI"))
+            |> Seq.length
+
+        Assert.Equal(1, schemaRejectionLogs)
     }
     |> Async.RunSynchronously
 

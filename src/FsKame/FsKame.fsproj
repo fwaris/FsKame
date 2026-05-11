@@ -57,6 +57,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Constants.fs" />
     <Compile Include="Icons.fs" />
     <Compile Include="Log.fs" />
@@ -76,6 +77,7 @@
     <Compile Include="Agents\AsyncPriorityQueue.fs" />
     <Compile Include="Agents\VoiceAgent.fs" />
     <Compile Include="Agents\AppAgent.fs" />
+    <Compile Include="Agents\QaAgent.fs" />
     <Compile Include="Agents\WorkFlow.fs" />
     <Compile Include="Interaction\Connect.fs" />
     <Compile Include="Interaction\Update.fs" />
@@ -101,6 +103,7 @@
 
     <!-- Raw Assets (also remove the "Resources\Raw" prefix) -->
     <MauiAsset Include="Resources\Raw\*" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+    <MauiAsset Include="Resources\Raw\FsColbertIndexes\**\*" LogicalName="FsColbertIndexes\%(RecursiveDir)%(Filename)%(Extension)" />
 
     <!-- Splash Screen -->
     <MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#512BD4" BaseSize="128,128" />
@@ -143,6 +146,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\FsKame.QA\FsKame.QA.fsproj" />
     <ProjectReference Include="..\FsKame.Tools\FsKame.Tools.fsproj" />
   </ItemGroup>
 

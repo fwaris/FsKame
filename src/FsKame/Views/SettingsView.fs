@@ -30,6 +30,7 @@ module SettingsView =
               Dimension.Absolute 48.
               Dimension.Absolute 48.
               Dimension.Absolute 48.
+              Dimension.Absolute 48.
               Dimension.Absolute 48. ]
         ) {
             ViewControls.formLabel "OpenAI key" 0
@@ -97,6 +98,14 @@ module SettingsView =
             Switch(model.useLexicalFilter, UseLexicalFilterToggled)
                 .isEnabled(canEditSettings)
                 .gridRow(5)
+                .gridColumn(1)
+                .centerVertical ()
+
+            ViewControls.formLabel "Index Keywords" 6
+
+            Switch(model.elaborateIndexKeywords, ElaborateIndexKeywordsToggled)
+                .isEnabled(canEditSettings)
+                .gridRow(6)
                 .gridColumn(1)
                 .centerVertical ()
         }

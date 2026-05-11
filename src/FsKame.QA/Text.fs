@@ -1,4 +1,4 @@
-namespace FsKame
+namespace FsKame.QA
 
 open System
 open System.Text.RegularExpressions
@@ -369,3 +369,10 @@ module ModelCapabilities =
         temperatureUnsupportedPrefixes
         |> List.exists (fun prefix -> modelId = prefix || modelId.StartsWith(prefix + "-"))
         |> not
+
+module QaDefaults =
+    let nanoModel = "gpt-5-nano"
+    let answerModel = "gpt-5.5"
+    let memoryCandidateChunks = 14
+    let maxContextChunks = 12
+    let neighborSeeds = 4

@@ -1,4 +1,4 @@
-namespace FsKame.WorkFlow
+namespace FsKame.QA
 
 open System
 open System.IO
@@ -10,9 +10,6 @@ open System.Threading
 open Microsoft.Extensions.AI
 open System.Text
 open System.Text.RegularExpressions
-open FsKame
-open Microsoft.Maui.Storage
-open OpenAI.Chat
 
 module KnowledgeSources =
     type RetrievalIndex =
@@ -52,7 +49,7 @@ module KnowledgeSources =
         let defaults =
             { enabled = true
               client = None
-              modelId = C.NANO_MODEL
+              modelId = "gpt-5-nano"
               schemaVersion = "passage-keywords-v1"
               batchSize = 4
               parallelism = 2
@@ -72,11 +69,6 @@ module KnowledgeSources =
 
     let private pdfIndexVersion = FsColbert.DocumentChunking.representationVersion
 
-    let private sourceKindFromDocument kind =
-        match kind with
-        | PdfFile -> Pdf
-        | MarkdownFile -> Markdown
-
     let disposeIndex (retrieval: RetrievalIndex) =
         retrieval.encoder
         |> Option.iter (fun encoder ->
@@ -84,16 +76,6 @@ module KnowledgeSources =
 
             if Some encoder = cachedEncoder then
                 cachedEncoder <- None)
-
-    let fromPdfDocuments (docs: PdfDocumentSource list) =
-        docs
-        |> PdfDocuments.selectedReady
-        |> List.map (fun doc ->
-            { kind = sourceKindFromDocument doc.kind
-              location = doc.storedPath
-              enabled = true })
-
-    let selectedSources (docs: PdfDocumentSource list) = fromPdfDocuments docs
 
     let private fsKameChunkOptions = FsColbert.ChunkOptions.fsKameDefaults
 
@@ -357,10 +339,6 @@ module KnowledgeSources =
         sectionHeadings retrieval
         |> List.tryFind (fun heading -> FsColbert.DocumentSections.matches requested heading)
 
-    let private createChatClient (key: string) (modelId: string) : IChatClient =
-        let client = OpenAI.OpenAIClient(key)
-        client.GetResponsesClient().AsIChatClient(modelId)
-
     let private retrievalActionTerms =
         [ "about"
           "can"
@@ -544,7 +522,7 @@ Query: {query}
         | _ -> 1.0f, 1.0f
 
     let rank
-        (apiKey: string option)
+        (queryExpansionClient: IChatClient option)
         (logExpansions: bool)
         (logChunks: bool)
         (useLexicalFilter: bool)
@@ -557,9 +535,8 @@ Query: {query}
             let localExpansion = createLocalExpansion query
 
             let! remoteExpansion =
-                match apiKey, useLexicalFilter with
-                | Some key, true when not (String.IsNullOrWhiteSpace key) ->
-                    use client = createChatClient key C.NANO_MODEL
+                match queryExpansionClient, useLexicalFilter with
+                | Some client, true ->
                     let r = if logExpansions then Some report else None
                     getSynonyms client r query
                 | _ -> async { return None }
@@ -668,30 +645,32 @@ Query: {query}
                 errors
         }
 
-    let private fsColbertRoot () =
-        let path = Path.Combine(FileSystem.AppDataDirectory, "FsKame", "FsColbert")
+    let private fsColbertRoot storageRoot =
+        let path = Path.Combine(storageRoot, "FsKame", "FsColbert")
         Directory.CreateDirectory path |> ignore
         path
 
-    let private modelFolder () =
-        Path.Combine(fsColbertRoot (), "Models", "mxbai-edge-colbert")
+    let private modelFolder storageRoot =
+        Path.Combine(fsColbertRoot storageRoot, "Models", "mxbai-edge-colbert")
 
-    let private indexFolder () =
-        let path = Path.Combine(fsColbertRoot (), "Indexes")
+    let private indexFolder storageRoot =
+        let path = Path.Combine(fsColbertRoot storageRoot, "Indexes")
         Directory.CreateDirectory path |> ignore
         path
 
-    let prebuiltFolder () =
-        let path = Path.Combine(fsColbertRoot (), "Prebuilt")
+    let private prebuiltFolder storageRoot =
+        let path = Path.Combine(fsColbertRoot storageRoot, "Prebuilt")
         Directory.CreateDirectory path |> ignore
         path
 
-    let prebuiltManifestPath () =
-        Path.Combine(prebuiltFolder (), "prebuilt-indexes.installed.json")
+    let private prebuiltManifestPath storageRoot =
+        Path.Combine(prebuiltFolder storageRoot, "prebuilt-indexes.installed.json")
 
-    let clearPersistedIndexes () =
+    let clearPersistedIndexes storageRoot =
         async {
-            let files = Directory.EnumerateFiles(indexFolder (), "*.fsci") |> Seq.toList
+            let files =
+                Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci") |> Seq.toList
+
             let errors = ResizeArray<string>()
 
             let deleted =
@@ -745,16 +724,16 @@ Query: {query}
           schemaVersion: string
           keywords: string list }
 
-    let private keywordCacheFolder () =
-        let path = Path.Combine(fsColbertRoot (), "KeywordCache")
+    let private keywordCacheFolder storageRoot =
+        let path = Path.Combine(fsColbertRoot storageRoot, "KeywordCache")
         Directory.CreateDirectory path |> ignore
         path
 
-    let private keywordCachePath sourceFingerprint modelId schemaVersion =
+    let private keywordCachePath storageRoot sourceFingerprint modelId schemaVersion =
         let fileName =
             [ sourceFingerprint; modelId; schemaVersion ] |> String.concat "\n" |> hashText
 
-        Path.Combine(keywordCacheFolder (), $"{fileName}.jsonl")
+        Path.Combine(keywordCacheFolder storageRoot, $"{fileName}.jsonl")
 
     let private sanitizeKeywordOptions (options: KeywordGenerationOptions) : KeywordGenerationOptions =
         { options with
@@ -1137,6 +1116,7 @@ Passages:
         |> String.concat "\n"
 
     let internal attachKeywords
+        (storageRoot: string)
         (report: string -> unit)
         (keywordOptions: KeywordGenerationOptions)
         (source: KnowledgeSource)
@@ -1151,7 +1131,7 @@ Passages:
                 let sourceFingerprintValue = sourceFingerprint source
 
                 let cachePath =
-                    keywordCachePath sourceFingerprintValue options.modelId options.schemaVersion
+                    keywordCachePath storageRoot sourceFingerprintValue options.modelId options.schemaVersion
 
                 let cached = loadKeywordCache cachePath sourceFingerprintValue options
 
@@ -1244,22 +1224,7 @@ Passages:
                 return enriched, keywordMetadataFingerprint options enriched
         }
 
-    let keywordOptionsFromApiKey enabled apiKey =
-        if not enabled then
-            KeywordGenerationOptions.disabled
-        else
-            apiKey
-            |> Option.bind Text.notEmpty
-            |> Option.map (fun key ->
-                { KeywordGenerationOptions.defaults with
-                    client = Some(createChatClient key C.NANO_MODEL)
-                    modelId = C.NANO_MODEL })
-            |> Option.defaultValue
-                { KeywordGenerationOptions.defaults with
-                    client = None
-                    modelId = C.NANO_MODEL }
-
-    let private sourceIndexPath (source: KnowledgeSource) keywordFingerprint =
+    let private sourceIndexPath storageRoot (source: KnowledgeSource) keywordFingerprint =
         let options = FsColbert.ChunkOptions.fsKameDefaults
 
         let fingerprint =
@@ -1270,9 +1235,9 @@ Passages:
               yield sourceFingerprint source ]
             |> String.concat "\n"
 
-        Path.Combine(indexFolder (), $"{hashText fingerprint}.fsci")
+        Path.Combine(indexFolder storageRoot, $"{hashText fingerprint}.fsci")
 
-    let private indexPath sources =
+    let private indexPath storageRoot sources =
         let options = FsColbert.ChunkOptions.fsKameDefaults
 
         let fingerprint =
@@ -1282,13 +1247,13 @@ Passages:
               yield! (sources |> List.map sourceFingerprint |> List.sort) ]
             |> String.concat "\n"
 
-        Path.Combine(indexFolder (), $"{hashText fingerprint}.fsci")
+        Path.Combine(indexFolder storageRoot, $"{hashText fingerprint}.fsci")
 
     let private tryLoadPersistedIndex path = FsColbert.IndexPersistence.tryLoad path
 
-    let private tryLoadPrebuiltManifest () =
+    let private tryLoadPrebuiltManifest storageRoot =
         try
-            let path = prebuiltManifestPath ()
+            let path = prebuiltManifestPath storageRoot
 
             if File.Exists path then
                 JsonSerializer.Deserialize<InstalledPrebuiltIndex array>(File.ReadAllText path)
@@ -1313,8 +1278,8 @@ Passages:
 
         { index with passages = passages }
 
-    let private tryLoadPrebuiltIndex (source: KnowledgeSource) =
-        tryLoadPrebuiltManifest ()
+    let private tryLoadPrebuiltIndex storageRoot (source: KnowledgeSource) =
+        tryLoadPrebuiltManifest storageRoot
         |> List.tryFind (fun item ->
             String.Equals(item.storedPath, source.location, StringComparison.OrdinalIgnoreCase)
             && File.Exists item.indexPath)
@@ -1326,7 +1291,7 @@ Passages:
                 | Ok None -> Ok None
                 | Error err -> Error err
 
-    let private loadEncoder () =
+    let private loadEncoder storageRoot =
         async {
             match cachedEncoder with
             | Some e -> return e
@@ -1336,7 +1301,7 @@ Passages:
                 let! files =
                     FsColbert.ModelCatalog.ensureDownloadedAsync
                         client
-                        (modelFolder ())
+                        (modelFolder storageRoot)
                         FsColbert.ModelCatalog.mxbaiEdgeColbertInt8
 
                 let encoder = FsColbert.OnnxColbertEncoder.Load files
@@ -1371,9 +1336,9 @@ Passages:
             return index
         }
 
-    let InindexSource report keywordOptions (source: KnowledgeSource) =
+    let InindexSource storageRoot report keywordOptions (source: KnowledgeSource) =
         async {
-            match tryLoadPrebuiltIndex source with
+            match tryLoadPrebuiltIndex storageRoot source with
             | Ok(Some _) -> report $"Prebuilt FsColbert index is available for {source.DisplayName}."
             | _ ->
                 let! result = sourcePassages source
@@ -1381,20 +1346,22 @@ Passages:
                 match result with
                 | Error _ -> ()
                 | Ok passages ->
-                    let! passages, keywordFingerprint = attachKeywords report keywordOptions source passages
-                    let path = sourceIndexPath source keywordFingerprint
+                    let! passages, keywordFingerprint = attachKeywords storageRoot report keywordOptions source passages
+
+                    let path = sourceIndexPath storageRoot source keywordFingerprint
 
                     match tryLoadPersistedIndex path with
                     | Ok(Some _) -> () // already indexed
                     | _ ->
                         report $"Preparing FsColbert model for {source.DisplayName}."
-                        let! encoder = loadEncoder ()
+                        let! encoder = loadEncoder storageRoot
                         report $"Building FsColbert index for {source.DisplayName}."
                         let! _ = buildIndexFromChunks report encoder passages path
                         ()
         }
 
     let loadIndex
+        storageRoot
         report
         (keywordOptions: KeywordGenerationOptions)
         (sources: KnowledgeSource list)
@@ -1405,12 +1372,12 @@ Passages:
             if List.isEmpty sources then
                 return { emptyIndex with sources = sources }, []
             else
-                let! encoder = loadEncoder ()
+                let! encoder = loadEncoder storageRoot
                 let indices = ResizeArray<KnowledgeSource * FsColbert.ColbertIndex>()
                 let errors = ResizeArray<string>()
 
                 for source in sources do
-                    match tryLoadPrebuiltIndex source with
+                    match tryLoadPrebuiltIndex storageRoot source with
                     | Ok(Some index) ->
                         report $"Loaded prebuilt FsColbert index for {source.DisplayName}."
                         indices.Add(source, index)
@@ -1421,8 +1388,10 @@ Passages:
                         match result with
                         | Error err -> errors.Add err
                         | Ok passages ->
-                            let! passages, keywordFingerprint = attachKeywords report keywordOptions source passages
-                            let path = sourceIndexPath source keywordFingerprint
+                            let! passages, keywordFingerprint =
+                                attachKeywords storageRoot report keywordOptions source passages
+
+                            let path = sourceIndexPath storageRoot source keywordFingerprint
 
                             match tryLoadPersistedIndex path with
                             | Ok(Some index) -> indices.Add(source, index)
@@ -1453,7 +1422,7 @@ Passages:
             "No selected document context was available."
         else
             chunks
-            |> List.truncate C.REALTIME_MEMORY_MAX_CONTEXT_CHUNKS
+            |> List.truncate QaDefaults.maxContextChunks
             |> List.mapi (fun index (chunk: SourceChunk) ->
                 let body = Text.truncate renderedChunkMaxChars chunk.text
                 $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{body}")

@@ -2,13 +2,17 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <RootNamespace>FsKame.Tools</RootNamespace>
+    <RootNamespace>FsKame.QA</RootNamespace>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="CurrentTimeTool.fs" />
-    <Compile Include="QaCurrentTimeProvider.fs" />
+    <Compile Include="Text.fs" />
+    <Compile Include="MemoryTypes.fs" />
+    <Compile Include="KnowledgeSources.fs" />
+    <Compile Include="DurableMemory.fs" />
+    <Compile Include="Tools.fs" />
+    <Compile Include="QaSession.fs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -17,7 +21,8 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.Core" />
-    <PackageReference Include="Microsoft.SemanticKernel" />
+    <PackageReference Include="FsColbert" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
   </ItemGroup>
 
 </Project>

@@ -18,13 +18,13 @@ module StateMachine =
           toolCatalog: ToolCatalog
           logExpansions: bool
           logChunks: bool
-          useLexicalFilter: bool }
+          useLexicalFilter: bool
+          elaborateIndexKeywords: bool }
 
     let private startAgents ss =
         async {
             AppAgent.start ss.mailbox ss.bus
-            MemoryAgent.start ss.apiKey ss.oracleModel ss.bus ss.toolHostContext ss.toolCatalog
-            OracleAgent.start ss.apiKey ss.oracleModel ss.bus
+            QaAgent.start ss.apiKey ss.oracleModel ss.bus
             VoiceAgent.start ss.apiKey ss.conn ss.bus
         }
 
@@ -49,7 +49,8 @@ module StateMachine =
                 let flags =
                     {| logExpansions = ss.logExpansions
                        logChunks = ss.logChunks
-                       useLexicalFilter = ss.useLexicalFilter |}
+                       useLexicalFilter = ss.useLexicalFilter
+                       elaborateIndexKeywords = ss.elaborateIndexKeywords |}
 
                 return F(s_run ss, [ Ag_SourcesUpdated(ss.retrievalMode, ss.sources, flags) ])
             | W_Msg(Fl_Terminate x) -> return terminate x.abnormal ss
@@ -77,6 +78,7 @@ module StateMachine =
         logExpansions
         logChunks
         useLexicalFilter
+        elaborateIndexKeywords
         =
         let bus = WBus<FlowMsg, AgentMsg>.Create()
 
@@ -92,7 +94,8 @@ module StateMachine =
               toolCatalog = toolCatalog
               logExpansions = logExpansions
               logChunks = logChunks
-              useLexicalFilter = useLexicalFilter }
+              useLexicalFilter = useLexicalFilter
+              elaborateIndexKeywords = elaborateIndexKeywords }
 
         RTFlow.Workflow.run CancellationToken.None bus (s_start ss)
 

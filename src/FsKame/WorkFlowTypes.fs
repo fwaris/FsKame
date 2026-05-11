@@ -261,7 +261,8 @@ type AgentMsg =
         KnowledgeSource list *
         {| logExpansions: bool
            logChunks: bool
-           useLexicalFilter: bool |}
+           useLexicalFilter: bool
+           elaborateIndexKeywords: bool |}
     | Ag_TranscriptUpdated of TranscriptSnapshot
     | Ag_MemoryRequested of MemoryRequest
     | Ag_MemoryReady of MemoryRequest * MemoryContext

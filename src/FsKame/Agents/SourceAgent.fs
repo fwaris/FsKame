@@ -13,7 +13,8 @@ module SourceAgent =
           retrieval: KnowledgeSources.RetrievalIndex
           logExpansions: bool
           logChunks: bool
-          useLexicalFilter: bool }
+          useLexicalFilter: bool
+          elaborateIndexKeywords: bool }
 
     let private loadSources (st: State) mode (sources: KnowledgeSource list) =
         async {
@@ -26,7 +27,11 @@ module SourceAgent =
             let! retrieval, errors =
                 match mode with
                 | InternalDocumentIndex -> KnowledgeSources.loadInternalIndex sources
-                | FsColbertWithFallback -> KnowledgeSources.loadIndex report sources
+                | FsColbertWithFallback ->
+                    let keywordOptions =
+                        KnowledgeSources.keywordOptionsFromApiKey st.elaborateIndexKeywords st.apiKey
+
+                    KnowledgeSources.loadIndex report keywordOptions sources
 
             for err in errors do
                 st.bus.PostToAgent(Ag_Log err)
@@ -48,7 +53,8 @@ module SourceAgent =
                     { st with 
                         logExpansions = flags.logExpansions
                         logChunks = flags.logChunks
-                        useLexicalFilter = flags.useLexicalFilter }
+                        useLexicalFilter = flags.useLexicalFilter
+                        elaborateIndexKeywords = flags.elaborateIndexKeywords }
                 return! loadSources st mode sources
             | Ag_TranscriptUpdated snapshot when snapshot.isFinal ->
                 let report msg = st.bus.PostToAgent(Ag_Log msg)
@@ -69,6 +75,7 @@ module SourceAgent =
               retrieval = KnowledgeSources.emptyIndex
               logExpansions = false
               logChunks = false
-              useLexicalFilter = true }
+              useLexicalFilter = true
+              elaborateIndexKeywords = true }
 
         bus.AgentBus.RunAsync("source", st0, update) |> FlowUtils.catch bus.PostToFlow

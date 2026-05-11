@@ -112,3 +112,20 @@ Based on Microsoft F# style guidance and common community conventions:
 
 # Experimental Coding
 - Put temporary, exploratory and/or experimental code in the /temp directory of the project.
+- ß
+## Parallelization
+For parallel processing, if feasible use FSharp.Control.AsyncSeq as in:
+```fsharp
+#r "nuget: FSharp.Control.AsyncSeq"
+open FSharp.Control
+
+let workOnChunk data = async {
+    return data
+}
+
+let data = [1;2;3]
+data 
+|> AsyncSeq.ofSeq
+|> AsyncSeq.bufferByCountAndTime 16 1
+|> AsyncSeq.mapAsyncParallelThrottled 3 workOnChunk
+```

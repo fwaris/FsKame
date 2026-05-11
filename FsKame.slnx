@@ -1,5 +1,8 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/FsKame.QA.Abstractions/FsKame.QA.Abstractions.fsproj" />
+    <Project Path="src/FsKame.QA/FsKame.QA.fsproj" />
+    <Project Path="src/FsKame.Cli/FsKame.Cli.fsproj" />
     <Project Path="src/FsKame.Tools/FsKame.Tools.fsproj" />
     <Project Path="src/FsKame/FsKame.fsproj" />
   </Folder>

@@ -248,3 +248,9 @@ module Settings =
 
     let setUseLexicalFilter value =
         Preferences.Default.Set(C.SETTINGS_USE_LEXICAL_FILTER, value)
+
+    let elaborateIndexKeywords () =
+        Preferences.Default.Get(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, true)
+
+    let setElaborateIndexKeywords value =
+        Preferences.Default.Set(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, value)

@@ -65,6 +65,7 @@ module Update =
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
         Settings.setUseLexicalFilter model.useLexicalFilter
+        Settings.setElaborateIndexKeywords model.elaborateIndexKeywords
 
     let private savePdfLibraryWithLog docs log =
         let saveLog =
@@ -74,13 +75,17 @@ module Update =
 
         saveLog :: log |> List.truncate C.MAX_LOG
 
+    let private keywordOptions model =
+        KnowledgeSources.keywordOptionsFromApiKey model.elaborateIndexKeywords (Some model.openAiKey)
+
     let private postSources model =
         match model.bundle with
         | Some bundle ->
             let flags =
                 {| logExpansions = model.logExpansions
                    logChunks = model.logChunks
-                   useLexicalFilter = model.useLexicalFilter |}
+                   useLexicalFilter = model.useLexicalFilter
+                   elaborateIndexKeywords = model.elaborateIndexKeywords |}
 
             bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model, flags))
         | None -> ()
@@ -101,11 +106,20 @@ module Update =
                 return Error ex
         }
 
-    let private processDocuments report (docs: PdfDocumentSource list) =
+    let private processDocuments report keywordOptions (docs: PdfDocumentSource list) =
         async {
             try
-                let! results = PdfLibrary.processDocuments report docs
+                let! results = PdfLibrary.processDocuments report keywordOptions docs
                 return Ok results
+            with ex ->
+                return Error ex
+        }
+
+    let private installPrebuiltDocuments docs =
+        async {
+            try
+                let! installed, logs = PdfLibrary.installPrebuiltDocuments docs
+                return Ok(installed, logs)
             with ex ->
                 return Error ex
         }
@@ -166,9 +180,12 @@ module Update =
           logExpansions = model.logExpansions
           logChunks = model.logChunks
           useLexicalFilter = model.useLexicalFilter
+          elaborateIndexKeywords = model.elaborateIndexKeywords
           toolCatalog = ToolCatalog.empty }
 
     let init () =
+        let docs = Settings.pdfLibrary ()
+
         { currentPage = Main
           mailbox = Channel.CreateBounded<Msg>(100)
           bundle = None
@@ -176,15 +193,16 @@ module Update =
           openAiKey = Settings.openAiKey ()
           oracleModel = Settings.oracleModel ()
           retrievalMode = Settings.retrievalMode ()
-          pdfDocuments = Settings.pdfLibrary ()
+          pdfDocuments = docs
           log = [ "FsKame ready. Add PDFs, then connect." ]
           logFontSize = 12.
           hideSecrets = true
           isBusy = false
           logExpansions = Settings.logExpansions ()
           logChunks = Settings.logChunks ()
-          useLexicalFilter = Settings.useLexicalFilter () },
-        Cmd.none
+          useLexicalFilter = Settings.useLexicalFilter ()
+          elaborateIndexKeywords = Settings.elaborateIndexKeywords () },
+        Cmd.OfAsync.either installPrebuiltDocuments docs PrebuiltDocumentsInstalled EventError
 
     let update msg model =
         match msg with
@@ -242,6 +260,38 @@ module Update =
                 saveSettings model
                 postSources model
                 model, Cmd.none
+        | ElaborateIndexKeywordsToggled value ->
+            match sourceConfigBlocked model "Changing index elaboration" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let model =
+                    { model with
+                        elaborateIndexKeywords = value }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
+        | PrebuiltDocumentsInstalled(Ok(docs, logs)) ->
+            let model =
+                { model with
+                    pdfDocuments = docs
+                    log = (logs @ model.log) |> List.truncate C.MAX_LOG }
+
+            let model =
+                { model with
+                    log = savePdfLibraryWithLog model.pdfDocuments model.log }
+
+            postSources model
+            model, Cmd.none
+        | PrebuiltDocumentsInstalled(Error ex) ->
+            { model with
+                log =
+                    $"Prebuilt document installation failed: {ex.Message}" :: model.log
+                    |> List.truncate C.MAX_LOG },
+            Cmd.none
         | Settings_Show ->
             match sourceConfigBlocked model "Opening settings" with
             | Some msg ->
@@ -297,7 +347,12 @@ module Update =
                 let report msg =
                     model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
 
-                model, Cmd.OfAsync.either (processDocuments report) docs PdfProcessingCompleted EventError
+                model,
+                Cmd.OfAsync.either
+                    (processDocuments report (keywordOptions model))
+                    docs
+                    PdfProcessingCompleted
+                    EventError
         | PickPdfsCompleted(Error ex) ->
             { model with
                 isBusy = false
@@ -390,7 +445,12 @@ module Update =
                         { model with
                             log = savePdfLibraryWithLog model.pdfDocuments model.log }
 
-                    model, Cmd.OfAsync.either (processDocuments report) retry PdfProcessingCompleted EventError
+                    model,
+                    Cmd.OfAsync.either
+                        (processDocuments report (keywordOptions model))
+                        retry
+                        PdfProcessingCompleted
+                        EventError
         | DeletePdf id ->
             match documentMutationBlocked model "Deleting documents" with
             | Some msg ->
