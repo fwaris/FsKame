@@ -1,6 +1,7 @@
 namespace FsKame.WorkFlow
 
 open System
+open System.Text.RegularExpressions
 open System.Text.Json
 open System.Text.Json.Serialization
 open System.Threading
@@ -84,18 +85,18 @@ Allowed direct actions:
 - handle short rapport, repetition, or simple clarification
 - ask a brief follow-up when the request is too vague to answer safely
 - answer simple conversational turns directly
-- say a short preamble before a tool call, such as "Let me check that."
 
 Tool use:
 - For every question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
 - Pass the user's request as the `question` argument.
 - When you call QUERY_ORACLE, you may pass compact advisory hints only when they are clear from the user's words and recent conversation: turn_kind, topic_continuity, memory_action, needs_external_context, sensitive, and confidence. These are hints only; the backend validates them and decides memory/tool/oracle handling.
+- Call QUERY_ORACLE silently. Do not say filler or status phrases before the call, such as "let me check", "one moment", "I'll look that up", or similar.
 - Do not refuse a request just because it is not about documents or selected sources.
 - Do not invent tool results, source details, page contents, citations, live values, or app state.
 
 After QUERY_ORACLE returns:
 - Treat the tool result as the authoritative answer.
-- Speak the tool result naturally and briefly, without adding new facts.
+- Speak the tool result naturally and briefly, without adding new facts or a status preface.
 - If the tool says there is not enough information, say that plainly."""
 
     let private oracleTool =
@@ -207,8 +208,26 @@ After QUERY_ORACLE returns:
     let private fallbackToolOutput (snapshot: TranscriptSnapshot) =
         $"I cannot answer that from the available tools and context right now. The user asked: {snapshot.text}"
 
+    let private speechFriendlyMarkdown (text: string) =
+        let replace (pattern: string) (replacement: string) (value: string) =
+            Regex.Replace(value, pattern, replacement)
+
+        text
+        |> replace @"(?m)^\s{0,3}#{1,6}\s*" ""
+        |> replace @"(?m)^\s{0,3}>\s?" ""
+        |> replace @"(?m)^\s*[-*+]\s+" ""
+        |> replace @"(?m)^\s*\d+[.)]\s+" ""
+        |> replace @"(?m)^\s*(-{3,}|\*{3,}|_{3,})\s*$" ""
+        |> replace @"!\[([^\]]*)\]\([^)]+\)" "$1"
+        |> replace @"\[([^\]]+)\]\([^)]+\)" "$1"
+        |> replace @"`([^`]+)`" "$1"
+        |> replace @"(\*\*|__)(.*?)\1" "$2"
+        |> replace @"(\*|_)(.*?)\1" "$2"
+        |> replace @"(?<!\S)#{1,6}(?!\S)" ""
+        |> FsKame.Text.normalizeWhitespace
+
     let private oracleToolOutput (_snapshot: TranscriptSnapshot) (candidate: OracleCandidate) =
-        candidate.answer |> FsKame.Text.normalizeWhitespace
+        candidate.answer |> speechFriendlyMarkdown
 
     let private makeTranscriptSnapshot st itemId text isFinal =
         let revision = st.revision + 1
@@ -235,7 +254,7 @@ After QUERY_ORACLE returns:
         | NoActiveResponse -> false
 
     let private speakToolResultInstructions =
-        "Speak the provided oracle answer naturally and briefly. Do not add facts, omit caveats, or reinterpret it. If the answer contains a refusal or uncertainty, preserve that."
+        "Start directly with the provided oracle answer. Speak it naturally and briefly. Do not add a preface such as 'I found', 'It says', 'Let me check', or 'Based on the context'. Do not add facts, omit caveats, or reinterpret it. If the answer contains a refusal or uncertainty, preserve that."
 
     let private tryScheduleSpeak (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
