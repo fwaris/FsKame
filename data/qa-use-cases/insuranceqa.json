@@ -1,0 +1,128 @@
+{
+  "id": "insuranceqa",
+  "displayName": "InsuranceQA",
+  "description": "Insurance customer-support benchmark retrieval over answer passages.",
+  "voiceReplacements": [
+    { "pattern": "\\be[\\s.\\-]+o[\\s.\\-]+i\\b", "replacement": "EOI" },
+    { "pattern": "\\bl[\\s.\\-]+t[\\s.\\-]+c\\b", "replacement": "LTC" },
+    { "pattern": "\\bc[\\s.\\-]+m[\\s.\\-]+s\\b", "replacement": "CMS" },
+    { "pattern": "\\ba[\\s.\\-]+c[\\s.\\-]+a\\b", "replacement": "ACA" },
+    { "pattern": "\\bh[\\s.\\-]+m[\\s.\\-]+o\\b", "replacement": "HMO" },
+    { "pattern": "\\bp[\\s.\\-]+p[\\s.\\-]+o\\b", "replacement": "PPO" },
+    { "pattern": "\\bh[\\s.\\-]+s[\\s.\\-]+a\\b", "replacement": "HSA" },
+    { "pattern": "\\bf[\\s.\\-]+s[\\s.\\-]+a\\b", "replacement": "FSA" },
+    { "pattern": "\\bs[\\s.\\-]+s[\\s.\\-]+d[\\s.\\-]+i\\b", "replacement": "SSDI" },
+    { "pattern": "\\bc[\\s.\\-]+o[\\s.\\-]+b[\\s.\\-]+r[\\s.\\-]+a\\b", "replacement": "COBRA" },
+    { "pattern": "\\bmed\\s+(?:a\\s+)?gap\\b", "replacement": "Medigap" },
+    { "pattern": "\\bmedicare\\s+gap\\b", "replacement": "Medigap" },
+    { "pattern": "\\brenter['’]?s\\b", "replacement": "renters" },
+    { "pattern": "\\bhome\\s+owner['’]?s\\b", "replacement": "homeowners" },
+    { "pattern": "\\bpit\\s*bull\\b", "replacement": "pitbull" },
+    { "pattern": "\\bfifteen\\s+hundred\\b", "replacement": "1500" },
+    { "pattern": "\\bone\\s+five\\s+zero\\s+zero\\b", "replacement": "1500" },
+    { "pattern": "\\bform\\s+fifteen\\s+hundred\\b", "replacement": "form 1500" }
+  ],
+  "queryExpansionRules": [
+    {
+      "triggers": [ "eoi", "evidence of insurability" ],
+      "terms": [ "evidence", "insurability", "underwriting", "proof", "health" ]
+    },
+    {
+      "triggers": [ "ltc", "long term care" ],
+      "terms": [ "long", "term", "care", "ltc", "policy", "benefits", "claims", "paying", "ability", "financial", "strength", "contractual", "language", "nursing", "home", "custodial", "assisted", "living" ]
+    },
+    {
+      "triggers": [ "medigap", "medicare supplement" ],
+      "terms": [ "medigap", "medicare", "supplement", "plan", "part", "coverage" ]
+    },
+    {
+      "triggers": [ "cms 1500", "claim form 1500", "form 1500" ],
+      "terms": [ "cms", "1500", "claim", "form", "health", "insurance" ]
+    },
+    {
+      "triggers": [ "workers comp", "workers compensation" ],
+      "terms": [ "workers", "compensation", "disability", "work", "injury", "benefits" ]
+    },
+    {
+      "triggers": [ "renters insurance", "renters", "rental insurance" ],
+      "terms": [ "renters", "renter", "tenant", "apartment", "personal", "property", "liability", "deductible", "covered", "loss", "fire", "smoke", "lightning", "claim" ]
+    },
+    {
+      "triggers": [ "homeowners", "home insurance", "property insurance" ],
+      "terms": [ "homeowners", "home", "property", "dwelling", "liability", "coverage", "exclusion", "deductible", "agent" ]
+    },
+    {
+      "triggers": [ "pitbull", "dog bite", "dog breed" ],
+      "terms": [ "pitbull", "dog", "breed", "animal", "bite", "liability", "exclude", "restrict", "deny", "coverage", "surcharge" ]
+    },
+    {
+      "triggers": [ "health insurance", "affordable care act", "obamacare", "aca" ],
+      "terms": [ "health", "insurance", "affordable", "care", "act", "aca", "obamacare", "enrollment", "marketplace", "exchange", "subsidy", "medicaid", "mandate", "coverage", "broker" ]
+    },
+    {
+      "triggers": [ "pregnant", "pregnancy", "maternity" ],
+      "terms": [ "pregnant", "pregnancy", "maternity", "medicaid", "special", "enrollment", "essential", "benefits", "coverage" ]
+    },
+    {
+      "triggers": [ "claim investigated", "investigated", "investigation", "red flags", "fraud" ],
+      "terms": [ "claim", "investigation", "investigated", "fraud", "red", "flags", "proof", "residency", "receipts", "bank", "statements", "due", "diligence" ]
+    },
+    {
+      "triggers": [ "disability insurance", "disability" ],
+      "terms": [ "disability", "income", "replacement", "work", "social", "security", "ssdi", "short", "term", "long", "benefits", "employer", "group" ]
+    },
+    {
+      "triggers": [ "corporation", "business" ],
+      "terms": [ "corporation", "business", "employer", "sponsored", "group", "executive", "deduct", "premiums", "taxable", "benefits" ]
+    },
+    {
+      "triggers": [ "tree falling", "tree", "falling on my car" ],
+      "terms": [ "tree", "falling", "car", "auto", "comprehensive", "homeowners", "deductible", "coverage", "exclusion" ]
+    },
+    {
+      "triggers": [ "quote", "quotes" ],
+      "terms": [ "quote", "quotes", "rate", "premium", "estimate", "agent", "broker", "coverage", "cost", "customer", "service", "replacement" ]
+    },
+    {
+      "triggers": [ "variable life" ],
+      "terms": [ "variable", "life", "whole", "universal", "risk", "cash", "value", "policy", "expenses", "performance", "payments" ]
+    },
+    {
+      "triggers": [ "file a renters insurance claim", "submit a renters insurance claim", "renters insurance claim" ],
+      "terms": [ "file", "submit", "claim", "renters", "agent", "broker", "insurer", "damaged", "stolen", "items", "liability" ]
+    },
+    {
+      "triggers": [ "buying life insurance", "life insurance" ],
+      "terms": [ "life", "insurance", "guarantees", "price", "income", "assets", "beneficiaries", "affordable", "budget", "agent", "coverage" ]
+    },
+    {
+      "triggers": [ "least expensive auto", "least expensive car", "cheap auto", "cheap car" ],
+      "terms": [ "least", "expensive", "cheap", "inexpensive", "low", "cost", "auto", "car", "rates", "premium", "compare" ]
+    },
+    {
+      "triggers": [ "biggest car insurance", "largest car insurance" ],
+      "terms": [ "biggest", "largest", "car", "auto", "insurance", "state", "farm", "allstate", "progressive", "farmers", "geico", "usaa" ]
+    }
+  ],
+  "keywordInstruction": "Prefer insurance terms, product names, coverage concepts, exclusions, claim language, likely customer wording, and benchmark answer labels when present in source metadata.",
+  "keywordHints": [
+    "insurance",
+    "coverage",
+    "policy",
+    "premium",
+    "deductible",
+    "claim",
+    "liability",
+    "benefits",
+    "underwriting",
+    "auto",
+    "homeowners",
+    "renters",
+    "health",
+    "life",
+    "disability",
+    "long term care"
+  ],
+  "answerSystemInstruction": "You are FsKame's reusable QA backend configured for an insurance question-answering benchmark. Answer from selected knowledge sources, durable memory, and tool observations when relevant. Treat tool observations as authoritative for current facts. Do not invent citations, source details, tool results, live values, policy terms, or coverage guarantees. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful.",
+  "judgeSystemInstruction": "Judge whether a generated insurance answer is supported by the reference answer text. Return JSON only."
+}

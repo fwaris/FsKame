@@ -8,6 +8,7 @@ open System.Threading.Tasks
 type KnowledgeSourceKind =
     | Pdf
     | Markdown
+    | Json
 
 type KnowledgeSource =
     { kind: KnowledgeSourceKind
@@ -18,6 +19,7 @@ type KnowledgeSource =
         match this.kind with
         | Pdf -> $"PDF: {this.location}"
         | Markdown -> $"Markdown: {this.location}"
+        | Json -> $"JSON: {this.location}"
 
 type SourceChunk =
     { source: KnowledgeSource

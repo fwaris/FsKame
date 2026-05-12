@@ -25,6 +25,10 @@ module Program =
           answerLabels: int list
           candidateLabels: int list }
 
+    type SearchMetadata =
+        { keywords: string list
+          questions: string list }
+
     let jsonOptions =
         let opts = JsonSerializerOptions(WriteIndented = true)
         opts.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
@@ -40,7 +44,7 @@ module Program =
 FsKame.Cli
 
 Commands:
-  ask --question "..." --source path [--source path] [--json]
+  ask --question "..." --source path [--source path] [--use-case-profile path] [--json]
   insuranceqa-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert] [--no-judge]
   insuranceqa-search-eval [--sample 30] [--data-dir temp/insuranceqa] [--retrieval internal|fscolbert]
   insuranceqa-elaborate-index [--data-dir temp/insuranceqa] [--small-model gpt-5-nano]
@@ -51,7 +55,9 @@ Common options:
   --small-model value      Defaults to gpt-5-nano.
   --storage-root path      Defaults to temp/fskame-cli.
   --index-path path        Optional persisted FsColbert .fsci file for search eval.
-  --answers-markdown path  Optional InsuranceQA markdown file to index/evaluate.
+  --answers-source path    Optional JSON/Markdown InsuranceQA answer source to index/evaluate.
+  --answers-markdown path  Back-compat alias for --answers-source.
+  --use-case-profile path  Optional QA use-case profile JSON for domain terms and prompts.
   --label-list-path path   Optional newline-delimited InsuranceQA answer labels for index elaboration.
   --llm-query-expansion    Use the configured small model to add retrieval terms in search eval.
   --expansion-replay-path path  Replay saved LLM expansion JSONL for fusion tests.
@@ -92,6 +98,11 @@ Common options:
 
     let optionValue name fallback parsed =
         optionValues name parsed |> List.tryLast |> Option.defaultValue fallback
+
+    let optionValueAny names fallback parsed =
+        names
+        |> List.tryPick (fun name -> optionValues name parsed |> List.tryLast)
+        |> Option.defaultValue fallback
 
     let hasFlag name parsed = parsed.flags.Contains name
 
@@ -134,6 +145,7 @@ Common options:
     let sourceKind (path: string) =
         match Path.GetExtension(path).TrimStart('.').ToLowerInvariant() with
         | "pdf" -> KnowledgeSourceKind.Pdf
+        | "json" -> KnowledgeSourceKind.Json
         | _ -> KnowledgeSourceKind.Markdown
 
     let sourceFromPath path =
@@ -144,6 +156,22 @@ Common options:
     let storageRoot parsed =
         optionValue "storage-root" (Path.Combine("temp", "fskame-cli")) parsed
         |> Path.GetFullPath
+
+    let private insuranceQaUseCaseProfilePath () =
+        Path.Combine("data", "qa-use-cases", "insuranceqa.json") |> Path.GetFullPath
+
+    let useCaseProfile parsed =
+        let defaultProfile =
+            if parsed.command.StartsWith("insuranceqa", StringComparison.OrdinalIgnoreCase) then
+                Some(insuranceQaUseCaseProfilePath ())
+            else
+                None
+
+        optionValues "use-case-profile" parsed
+        |> List.tryLast
+        |> Option.orElse defaultProfile
+        |> Option.bind QaUseCaseProfile.tryLoad
+        |> Option.defaultValue QaUseCaseProfile.generic
 
     let createSession parsed autoWriteback =
         let storageRoot = storageRoot parsed
@@ -162,6 +190,7 @@ Common options:
             { QaSessionOptions.create storageRoot with
                 retrievalMode = retrievalMode parsed
                 clients = clients
+                useCaseProfile = useCaseProfile parsed
                 answerModelId = optionValue "answer-model" QaDefaults.answerModel parsed
                 keywordModelId = optionValue "small-model" QaDefaults.nanoModel parsed
                 elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
@@ -178,6 +207,7 @@ Common options:
         function
         | KnowledgeSourceKind.Pdf -> "pdf"
         | KnowledgeSourceKind.Markdown -> "markdown"
+        | KnowledgeSourceKind.Json -> "json"
 
     let answerJson (answer: QaAnswer) =
         {| turnId = answer.turnId
@@ -293,6 +323,38 @@ Common options:
             | false, _ -> None)
         |> Array.toList
 
+    let private emptySearchMetadata = { keywords = []; questions = [] }
+
+    let private writeInsuranceQaJsonSource (answers: Map<int, string>) (metadata: Map<int, SearchMetadata>) path =
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath path))
+        |> ignore
+
+        let documents =
+            answers
+            |> Map.toList
+            |> List.map (fun (label, answer) ->
+                let itemMetadata =
+                    metadata |> Map.tryFind label |> Option.defaultValue emptySearchMetadata
+
+                {| id = string label
+                   title = $"Answer label: {label}"
+                   text = answer
+                   keywords =
+                    seq {
+                        yield! itemMetadata.keywords
+                        yield! itemMetadata.questions
+                    }
+                    |> Seq.distinctBy _.ToLowerInvariant()
+                    |> Seq.toList
+                   questions = itemMetadata.questions |})
+
+        let source =
+            {| id = "insuranceqa-answers"
+               title = "InsuranceQA Answers"
+               documents = documents |}
+
+        File.WriteAllText(path, JsonSerializer.Serialize(source, jsonOptions))
+
     let loadInsuranceQa dataDir =
         task {
             let dataDir = Path.GetFullPath dataDir
@@ -340,18 +402,12 @@ Common options:
                               candidateLabels = parseInts parts[3] }
                     | _ -> None)
 
-            let markdownPath = Path.Combine(dataDir, "insuranceqa.answers.md")
+            let jsonPath = Path.Combine(dataDir, "insuranceqa.answers.json")
 
-            if not (File.Exists markdownPath) then
-                use writer = new StreamWriter(markdownPath, false)
-                writer.WriteLine("# InsuranceQA Answers")
+            if not (File.Exists jsonPath) then
+                writeInsuranceQaJsonSource answers Map.empty jsonPath
 
-                for KeyValue(label, answer) in answers do
-                    writer.WriteLine()
-                    writer.WriteLine($"## Answer label: {label}")
-                    writer.WriteLine(answer)
-
-            return answers, questions, markdownPath
+            return answers, questions, jsonPath
         }
 
     let termSet value = Text.terms value |> Set.ofList
@@ -413,7 +469,7 @@ Common options:
                 let prompt =
                     [ ChatMessage(
                           ChatRole.System,
-                          "You judge whether a generated customer-support answer is supported by reference answers. Return JSON only."
+                          "You judge whether a generated answer is supported by reference answers. Return JSON only."
                       )
                       ChatMessage(
                           ChatRole.User,
@@ -496,7 +552,7 @@ Common options:
                 []
         }
 
-    let loadInsuranceQaRetrieval parsed (source: KnowledgeSource) =
+    let loadInsuranceQaRetrieval parsed profile (source: KnowledgeSource) =
         async {
             let report (msg: string) = Console.Error.WriteLine msg
 
@@ -521,7 +577,8 @@ Common options:
                         { KnowledgeSources.KeywordGenerationOptions.defaults with
                             enabled = not (hasFlag "no-index-elaboration" parsed)
                             client = clients.queryExpansion
-                            modelId = optionValue "small-model" QaDefaults.nanoModel parsed }
+                            modelId = optionValue "small-model" QaDefaults.nanoModel parsed
+                            useCaseProfile = profile }
 
                     return! KnowledgeSources.loadIndex (storageRoot parsed) report keywordOptions [ source ]
         }
@@ -667,7 +724,7 @@ Common options:
         |> List.distinctBy _.ToLowerInvariant()
         |> List.truncate maxValues
 
-    let private sanitizeIndexElaboration elaboration =
+    let private sanitizeIndexElaboration (elaboration: IndexElaboration) : IndexElaboration =
         { elaboration with
             keywords = cleanIndexValues 16 elaboration.keywords
             questions = cleanIndexValues 4 elaboration.questions }
@@ -783,7 +840,7 @@ Common options:
         else
             normalized.Substring(0, 900)
 
-    let private indexElaborationPrompt (batch: (int * string) list) =
+    let private indexElaborationPrompt (profile: QaUseCaseProfile) (batch: (int * string) list) =
         let payload =
             batch
             |> List.map (fun (label, answer) ->
@@ -791,18 +848,36 @@ Common options:
                    answer = promptAnswerText answer |})
             |> fun items -> JsonSerializer.Serialize(items, jsonLineOptions)
 
+        let profile = QaUseCaseProfile.sanitize profile
+
+        let profileHints =
+            let hints = QaUseCaseProfile.renderHints profile
+
+            seq {
+                yield $"Use case: {profile.displayName} ({profile.id})."
+
+                match profile.description with
+                | Some description -> yield $"Description: {description}"
+                | None -> ()
+
+                if not (String.IsNullOrWhiteSpace hints) then
+                    yield $"Domain hints: {hints}"
+            }
+            |> String.concat "\n"
+
         $"""
-Create compact search-index metadata for insurance customer-support answers.
+Create compact search-index metadata for reusable QA answers.
+{profileHints}
 
 Return only a JSON object with one property, "items", whose value is an array.
 Each item must have:
 - label: the same integer label.
-- keywords: 8-16 short phrases, synonyms, abbreviations, products, coverage terms, entities, and likely search wording.
-- questions: 2-4 short customer questions that this answer would directly answer.
+- keywords: 8-16 short phrases, synonyms, abbreviations, product or feature names, entities, and likely search wording.
+- questions: 2-4 short user questions that this answer would directly answer.
 
 Rules:
 - Use only facts supported by the answer text.
-- Prefer customer wording that may not appear literally in the answer.
+- Prefer user wording that may not appear literally in the answer.
 - Do not include markdown, explanations, answer prose, or fields other than label, keywords, questions.
 
 Answers:
@@ -843,9 +918,10 @@ Answers:
         strictJsonSchemaResponseFormat
             schema
             "insuranceqa_index_elaboration_batch"
-            "Search-index keyword and question metadata for InsuranceQA answers."
+            "Search-index keyword and question metadata for QA answers."
 
     let private generateIndexElaborationBatch
+        (profile: QaUseCaseProfile)
         (client: IChatClient)
         (maxOutputTokens: int)
         (batch: (int * string) list)
@@ -862,7 +938,7 @@ Answers:
             opts.Reasoning <- reasoning
 
             let! response =
-                client.GetResponseAsync<IndexElaborationBatch>(indexElaborationPrompt batch, opts)
+                client.GetResponseAsync<IndexElaborationBatch>(indexElaborationPrompt profile batch, opts)
                 |> Async.AwaitTask
 
             let parsed = response.Result.items |> List.map sanitizeIndexElaboration
@@ -883,10 +959,10 @@ Answers:
                 |> List.distinctBy _.label
         }
 
-    let rec private generateIndexElaborations (client: IChatClient) maxOutputTokens batch =
+    let rec private generateIndexElaborations profile (client: IChatClient) maxOutputTokens batch =
         async {
             try
-                let! generated = generateIndexElaborationBatch client maxOutputTokens batch
+                let! generated = generateIndexElaborationBatch profile client maxOutputTokens batch
                 let generatedLabels = generated |> List.map _.label |> Set.ofList
 
                 let missing =
@@ -898,7 +974,7 @@ Answers:
                 else
                     let! recovered =
                         missing
-                        |> List.map (fun item -> generateIndexElaborations client maxOutputTokens [ item ])
+                        |> List.map (fun item -> generateIndexElaborations profile client maxOutputTokens [ item ])
                         |> Async.Parallel
 
                     match
@@ -932,8 +1008,8 @@ Answers:
                         let half = max 1 (batch.Length / 2)
                         batch |> List.splitAt half
 
-                    let! left = generateIndexElaborations client maxOutputTokens firstHalf
-                    let! right = generateIndexElaborations client maxOutputTokens secondHalf
+                    let! left = generateIndexElaborations profile client maxOutputTokens firstHalf
+                    let! right = generateIndexElaborations profile client maxOutputTokens secondHalf
 
                     match left, right with
                     | RejectedIndexElaborationSchema reason, _
@@ -942,36 +1018,20 @@ Answers:
                         return GeneratedIndexElaborations(left @ right)
         }
 
-    let private writeIndexElaborationMarkdown (answers: Map<int, string>) expansions path =
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath path))
-        |> ignore
+    let private writeIndexElaborationJsonSource (answers: Map<int, string>) expansions path =
+        let metadata =
+            expansions
+            |> Map.map (fun _ expansion ->
+                { keywords = expansion.keywords
+                  questions = expansion.questions })
 
-        use writer = new StreamWriter(path, false)
-        writer.WriteLine("# InsuranceQA Answers")
-
-        for KeyValue(label, answer) in answers do
-            writer.WriteLine()
-            writer.WriteLine($"## Answer label: {label}")
-            writer.WriteLine(answer)
-
-            match expansions |> Map.tryFind label with
-            | None -> ()
-            | Some expansion ->
-                if not (List.isEmpty expansion.keywords) then
-                    let keywordsText = String.concat "; " expansion.keywords
-                    writer.WriteLine()
-                    writer.WriteLine($"Index keywords: {keywordsText}")
-
-                if not (List.isEmpty expansion.questions) then
-                    writer.WriteLine("Likely customer questions:")
-
-                    for question in expansion.questions do
-                        writer.WriteLine($"- {question}")
+        writeInsuranceQaJsonSource answers metadata path
 
     let runInsuranceQaElaborateIndex parsed =
         task {
             let dataDir = optionValue "data-dir" (Path.Combine("temp", "insuranceqa")) parsed
             let model = optionValue "small-model" "gpt-5-nano" parsed
+            let profile = useCaseProfile parsed
             let batchSize = optionValue "batch-size" "8" parsed |> Int32.Parse
             let parallelism = optionValue "parallelism" "2" parsed |> Int32.Parse
 
@@ -998,12 +1058,12 @@ Answers:
                     (Path.Combine(Path.GetFullPath dataDir, $"insuranceqa.index-elaboration.{safeFilePart model}.jsonl"))
                     parsed
 
-            let markdownPath =
-                optionValue
-                    "answers-markdown"
+            let answersSourcePath =
+                optionValueAny
+                    [ "answers-source"; "answers-markdown" ]
                     (Path.Combine(
                         Path.GetFullPath dataDir,
-                        $"insuranceqa.answers.index-elaborated.{safeFilePart model}.md"
+                        $"insuranceqa.answers.index-elaborated.{safeFilePart model}.json"
                     ))
                     parsed
 
@@ -1054,7 +1114,7 @@ Answers:
                     for wave in batches |> List.chunkBySize parallelism do
                         let! waveResults =
                             wave
-                            |> List.map (generateIndexElaborations client maxOutputTokens)
+                            |> List.map (generateIndexElaborations profile client maxOutputTokens)
                             |> Async.Parallel
                             |> Async.StartAsTask
 
@@ -1083,10 +1143,11 @@ Answers:
                     |> Seq.map (fun item -> item.label, item)
                     |> Map.ofSeq
 
-                writeIndexElaborationMarkdown answers expansions markdownPath
+                writeIndexElaborationJsonSource answers expansions answersSourcePath
 
                 printJson
                     {| model = model
+                       useCaseProfile = profile.id
                        answers = answers.Count
                        targetedAnswers = targetAnswers.Length
                        targetedElaborations =
@@ -1096,7 +1157,7 @@ Answers:
                         |> Seq.length
                        cachedElaborations = expansions.Count
                        cachePath = Path.GetFullPath cachePath
-                       markdownPath = Path.GetFullPath markdownPath |}
+                       answersSourcePath = Path.GetFullPath answersSourcePath |}
 
                 return 0
         }
@@ -1270,19 +1331,21 @@ Answers:
                 optionValue "max-results" (string QaDefaults.memoryCandidateChunks) parsed
                 |> Int32.Parse
 
-            let! answers, questions, defaultMarkdownPath = loadInsuranceQa dataDir
+            let profile = useCaseProfile parsed
+            let! answers, questions, defaultAnswersSourcePath = loadInsuranceQa dataDir
 
-            let markdownPath =
-                optionValue "answers-markdown" defaultMarkdownPath parsed |> Path.GetFullPath
+            let answersSourcePath =
+                optionValueAny [ "answers-source"; "answers-markdown" ] defaultAnswersSourcePath parsed
+                |> Path.GetFullPath
 
             let selected = questions |> List.truncate sample
 
             let source =
-                { kind = KnowledgeSourceKind.Markdown
-                  location = markdownPath
+                { kind = sourceKind answersSourcePath
+                  location = answersSourcePath
                   enabled = true }
 
-            let! retrieval, errors = loadInsuranceQaRetrieval parsed source
+            let! retrieval, errors = loadInsuranceQaRetrieval parsed profile source
 
             for error in errors do
                 Console.Error.WriteLine error
@@ -1315,7 +1378,9 @@ Answers:
             let mutable top10 = 0
 
             for index, question in selected |> List.indexed do
-                let processed = Text.QueryPostProcessing.forVoiceLikeRetrieval question.question
+                let processed =
+                    Text.QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile question.question
+
                 let expansionLogs = ResizeArray<string>()
                 let sw = Stopwatch.StartNew()
 
@@ -1323,7 +1388,8 @@ Answers:
                     task {
                         if fusionMode = "standard" then
                             let! chunks =
-                                KnowledgeSources.rank
+                                KnowledgeSources.rankWithProfile
+                                    profile
                                     queryExpansionClient
                                     (Option.isSome queryExpansionClient)
                                     false
@@ -1425,6 +1491,7 @@ Answers:
             let summary =
                 {| sample = selected.Length
                    indexedAnswers = answers.Count
+                   useCaseProfile = profile.id
                    retrievalMode = RetrievalModes.displayName (retrievalMode parsed)
                    maxResults = maxResults
                    hits = hits
@@ -1456,10 +1523,12 @@ Answers:
         task {
             let sample = optionValue "sample" "30" parsed |> fun value -> Int32.Parse value
             let dataDir = optionValue "data-dir" (Path.Combine("temp", "insuranceqa")) parsed
-            let! answers, questions, defaultMarkdownPath = loadInsuranceQa dataDir
+            let profile = useCaseProfile parsed
+            let! answers, questions, defaultAnswersSourcePath = loadInsuranceQa dataDir
 
-            let markdownPath =
-                optionValue "answers-markdown" defaultMarkdownPath parsed |> Path.GetFullPath
+            let answersSourcePath =
+                optionValueAny [ "answers-source"; "answers-markdown" ] defaultAnswersSourcePath parsed
+                |> Path.GetFullPath
 
             let selected = questions |> List.truncate sample
             let useJudge = not (hasFlag "no-judge" parsed)
@@ -1477,8 +1546,8 @@ Answers:
             use session = createSession parsed false
 
             let source =
-                { kind = KnowledgeSourceKind.Markdown
-                  location = markdownPath
+                { kind = sourceKind answersSourcePath
+                  location = answersSourcePath
                   enabled = true }
 
             let! _ = session.LoadSourcesAsync(retrievalMode parsed, [ source ], CancellationToken.None)
@@ -1565,6 +1634,7 @@ Answers:
             let summary =
                 {| sample = selected.Length
                    indexedAnswers = answers.Count
+                   useCaseProfile = profile.id
                    retrievalMode = RetrievalModes.displayName (retrievalMode parsed)
                    contextHitRate =
                     if selected.IsEmpty then

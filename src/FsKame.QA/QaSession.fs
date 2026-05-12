@@ -25,6 +25,7 @@ type QaSessionOptions =
       toolProviderDirectory: string option
       retrievalMode: RetrievalMode
       clients: QaModelClients
+      useCaseProfile: QaUseCaseProfile
       answerModelId: string
       keywordModelId: string
       elaborateIndexKeywords: bool
@@ -41,6 +42,7 @@ module QaSessionOptions =
           toolProviderDirectory = None
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
+          useCaseProfile = QaUseCaseProfile.generic
           answerModelId = QaDefaults.answerModel
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
@@ -132,7 +134,9 @@ type QaSession(options: QaSessionOptions) =
 
         [ ChatMessage(
               ChatRole.System,
-              "You are FsKame's reusable QA backend. Answer from selected knowledge sources, durable memory, and tool observations when they are relevant. Treat tool observations as authoritative for current facts. Do not invent citations, source details, tool results, or live values. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful."
+              (options.useCaseProfile.answerSystemInstruction
+               |> Option.defaultValue
+                   "You are FsKame's reusable QA backend. Answer from selected knowledge sources, durable memory, and tool observations when they are relevant. Treat tool observations as authoritative for current facts. Do not invent citations, source details, tool results, or live values. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful.")
           )
           ChatMessage(
               ChatRole.User,
@@ -378,7 +382,8 @@ Use an empty calls array when no tool is needed."""
             member _.Report message = report message
 
             member _.SearchKnowledgeAsync(question, maxResults, cancellationToken) =
-                KnowledgeSources.rank
+                KnowledgeSources.rankWithProfile
+                    options.useCaseProfile
                     options.clients.queryExpansion
                     options.logExpansions
                     options.logChunks
@@ -511,7 +516,8 @@ Use an empty calls array when no tool is needed."""
                         { KnowledgeSources.KeywordGenerationOptions.defaults with
                             enabled = options.elaborateIndexKeywords
                             client = options.clients.queryExpansion
-                            modelId = options.keywordModelId }
+                            modelId = options.keywordModelId
+                            useCaseProfile = options.useCaseProfile }
 
                     KnowledgeSources.loadIndex options.storageRoot report keywordOptions sources
 
@@ -545,7 +551,8 @@ Use an empty calls array when no tool is needed."""
                     let sw = Stopwatch.StartNew()
 
                     let! chunks =
-                        KnowledgeSources.rank
+                        KnowledgeSources.rankWithProfile
+                            options.useCaseProfile
                             options.clients.queryExpansion
                             options.logExpansions
                             options.logChunks

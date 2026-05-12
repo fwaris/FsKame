@@ -43,7 +43,8 @@ module KnowledgeSources =
           schemaVersion: string
           batchSize: int
           parallelism: int
-          maxOutputTokens: int }
+          maxOutputTokens: int
+          useCaseProfile: QaUseCaseProfile }
 
     module KeywordGenerationOptions =
         let defaults =
@@ -53,7 +54,8 @@ module KnowledgeSources =
               schemaVersion = "passage-keywords-v1"
               batchSize = 4
               parallelism = 2
-              maxOutputTokens = 25000 }
+              maxOutputTokens = 25000
+              useCaseProfile = QaUseCaseProfile.generic }
 
         let disabled = { defaults with enabled = false }
 
@@ -79,6 +81,120 @@ module KnowledgeSources =
 
     let private fsKameChunkOptions = FsColbert.ChunkOptions.fsKameDefaults
 
+    [<CLIMutable>]
+    type private JsonKnowledgeDocument =
+        { id: string
+          title: string
+          text: string
+          keywords: string list }
+
+    let private tryJsonStringProperty (name: string) (root: JsonElement) =
+        let mutable property = Unchecked.defaultof<JsonElement>
+
+        if root.ValueKind = JsonValueKind.Object && root.TryGetProperty(name, &property) then
+            match property.ValueKind with
+            | JsonValueKind.String -> property.GetString() |> Text.notEmpty
+            | JsonValueKind.Number -> property.GetRawText() |> Text.notEmpty
+            | JsonValueKind.True -> Some "true"
+            | JsonValueKind.False -> Some "false"
+            | _ -> None
+        else
+            None
+
+    let private tryJsonStringListProperty (name: string) (root: JsonElement) =
+        let mutable property = Unchecked.defaultof<JsonElement>
+
+        if root.ValueKind = JsonValueKind.Object && root.TryGetProperty(name, &property) then
+            match property.ValueKind with
+            | JsonValueKind.Array ->
+                property.EnumerateArray()
+                |> Seq.choose (fun item ->
+                    if item.ValueKind = JsonValueKind.String then
+                        item.GetString() |> Text.notEmpty
+                    else
+                        None)
+                |> Seq.distinctBy _.ToLowerInvariant()
+                |> Seq.toList
+            | JsonValueKind.String ->
+                property.GetString()
+                |> Option.ofObj
+                |> Option.map (fun value ->
+                    value.Split(
+                        [| ','; ';'; '|' |],
+                        StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries
+                    )
+                    |> Array.choose Text.notEmpty
+                    |> Array.distinctBy _.ToLowerInvariant()
+                    |> Array.toList)
+                |> Option.defaultValue []
+            | _ -> []
+        else
+            []
+
+    let private tryJsonKnowledgeDocument (root: JsonElement) =
+        let text =
+            [ "text"; "body"; "answer"; "content" ]
+            |> List.tryPick (fun name -> tryJsonStringProperty name root)
+
+        text
+        |> Option.map (fun text ->
+            { id =
+                [ "id"; "label"; "key" ]
+                |> List.tryPick (fun name -> tryJsonStringProperty name root)
+                |> Option.defaultValue ""
+              title =
+                [ "title"; "heading"; "name" ]
+                |> List.tryPick (fun name -> tryJsonStringProperty name root)
+                |> Option.defaultValue ""
+              text = text
+              keywords = tryJsonStringListProperty "keywords" root })
+
+    let private jsonKnowledgeDocuments (root: JsonElement) =
+        match root.ValueKind with
+        | JsonValueKind.Array -> root.EnumerateArray() |> Seq.choose tryJsonKnowledgeDocument |> Seq.toList
+        | JsonValueKind.Object ->
+            let mutable documents = Unchecked.defaultof<JsonElement>
+
+            if
+                root.TryGetProperty("documents", &documents)
+                && documents.ValueKind = JsonValueKind.Array
+            then
+                documents.EnumerateArray() |> Seq.choose tryJsonKnowledgeDocument |> Seq.toList
+            else
+                tryJsonKnowledgeDocument root |> Option.toList
+        | _ -> []
+
+    let private jsonPassages (passageSource: FsColbert.PassageSource) path =
+        async {
+            try
+                use document = JsonDocument.Parse(File.ReadAllText path)
+                let documents = jsonKnowledgeDocuments document.RootElement
+
+                if List.isEmpty documents then
+                    return Error $"No JSON knowledge documents were found in {path}."
+                else
+                    return
+                        documents
+                        |> List.mapi (fun index item ->
+                            let title = item.title |> Text.notEmpty |> Option.orElse (item.id |> Text.notEmpty)
+
+                            let text =
+                                match title with
+                                | Some title -> $"{title}\n{item.text}"
+                                | None -> item.text
+
+                            ({ sourceId = passageSource.id
+                               sourceDisplayName = passageSource.displayName
+                               sourceLocation = passageSource.location
+                               index = index
+                               text = Text.normalizeWhitespace text
+                               keywords = item.keywords }
+                            : FsColbert.PassageRef))
+                        |> Ok
+            with ex ->
+                return Error $"Unable to read JSON knowledge source '{path}': {ex.Message}"
+        }
+
     let private sourcePassages (source: KnowledgeSource) =
         let passageSource =
             FsColbert.PassageSource.create source.location source.DisplayName source.location
@@ -86,6 +202,7 @@ module KnowledgeSources =
         match source.kind with
         | Pdf -> FsColbert.PdfDocuments.readPassages fsKameChunkOptions passageSource source.location
         | Markdown -> FsColbert.MarkdownDocuments.readPassages fsKameChunkOptions passageSource source.location
+        | Json -> jsonPassages passageSource source.location
 
     let loadChunks (sources: KnowledgeSource list) : Async<SourceChunk list * string list> =
         async {
@@ -121,6 +238,7 @@ module KnowledgeSources =
         match sourceKind with
         | Pdf -> "pdf"
         | Markdown -> "markdown"
+        | Json -> "json"
 
     let private sourceFromLocation (sources: KnowledgeSource list) (location: string) : KnowledgeSource =
         sources
@@ -397,11 +515,13 @@ module KnowledgeSources =
             else
                 None)
 
-    let private createLocalExpansion query =
+    let private createLocalExpansionWithProfile profile query =
         if String.IsNullOrWhiteSpace query then
             None
         else
-            let processed = Text.QueryPostProcessing.forVoiceLikeRetrieval query
+            let processed =
+                Text.QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile query
+
             let target = tryExtractRetrievalTarget query
 
             let queryType =
@@ -428,6 +548,9 @@ module KnowledgeSources =
                   rewrittenQueries = distinctNonEmpty rewrittenQueries
                   sectionName = target
                   queryType = queryType }
+
+    let private createLocalExpansion query =
+        createLocalExpansionWithProfile QaUseCaseProfile.generic query
 
     let private mergeExpansions localExpansion remoteExpansion =
         match localExpansion, remoteExpansion with
@@ -475,15 +598,38 @@ module KnowledgeSources =
                     |> List.truncate 3
                 sectionName = Some canonicalSection }
 
-    let getSynonyms (client: IChatClient) (report: (string -> unit) option) query : Async<Expansion option> =
+    let getSynonymsWithProfile
+        (profile: QaUseCaseProfile)
+        (client: IChatClient)
+        (report: (string -> unit) option)
+        query
+        : Async<Expansion option> =
         async {
             if String.IsNullOrWhiteSpace query then
                 return None
             else
                 try
+                    let profile = QaUseCaseProfile.sanitize profile
+
+                    let profileHints =
+                        let hints = QaUseCaseProfile.renderHints profile
+
+                        seq {
+                            yield $"Use case: {profile.displayName} ({profile.id})."
+
+                            match profile.description with
+                            | Some description -> yield $"Description: {description}"
+                            | None -> ()
+
+                            if not (String.IsNullOrWhiteSpace hints) then
+                                yield $"Domain hints: {hints}"
+                        }
+                        |> String.concat "\n"
+
                     let prompt =
                         $"""
-Create compact retrieval signals for searching PDF passages.
+Create compact retrieval signals for searching selected knowledge-source passages.
+{profileHints}
 
 Return JSON matching the schema:
 - terms: at most 8 content keywords, aliases, or technical terms likely to appear in relevant passages. Avoid generic action words such as summarize, explain, describe, question, answer, paper, document, and PDF.
@@ -515,13 +661,17 @@ Query: {query}
                     return None
         }
 
+    let getSynonyms (client: IChatClient) (report: (string -> unit) option) query : Async<Expansion option> =
+        getSynonymsWithProfile QaUseCaseProfile.generic client report query
+
     let private getSearchWeights =
         function
         | QueryType.Question -> 1.0f, 0.1f
         | QueryType.SectionRetrieval -> 0.65f, 1.0f
         | _ -> 1.0f, 1.0f
 
-    let rank
+    let rankWithProfile
+        (profile: QaUseCaseProfile)
         (queryExpansionClient: IChatClient option)
         (logExpansions: bool)
         (logChunks: bool)
@@ -532,13 +682,13 @@ Query: {query}
         (retrieval: RetrievalIndex)
         : Async<SourceChunk list> =
         async {
-            let localExpansion = createLocalExpansion query
+            let localExpansion = createLocalExpansionWithProfile profile query
 
             let! remoteExpansion =
                 match queryExpansionClient, useLexicalFilter with
                 | Some client, true ->
                     let r = if logExpansions then Some report else None
-                    getSynonyms client r query
+                    getSynonymsWithProfile profile client r query
                 | _ -> async { return None }
 
             let expansion =
@@ -628,6 +778,27 @@ Query: {query}
                     return lexicalFallback ()
             | _ -> return lexicalFallback ()
         }
+
+    let rank
+        (queryExpansionClient: IChatClient option)
+        (logExpansions: bool)
+        (logChunks: bool)
+        (useLexicalFilter: bool)
+        (report: string -> unit)
+        (query: string)
+        (maxResults: int)
+        (retrieval: RetrievalIndex)
+        : Async<SourceChunk list> =
+        rankWithProfile
+            QaUseCaseProfile.generic
+            queryExpansionClient
+            logExpansions
+            logChunks
+            useLexicalFilter
+            report
+            query
+            maxResults
+            retrieval
 
     let private enabledSources (sources: KnowledgeSource list) =
         sources |> List.filter (fun source -> source.enabled)
@@ -722,6 +893,7 @@ Query: {query}
           textHash: string
           modelId: string
           schemaVersion: string
+          profileFingerprint: string
           keywords: string list }
 
     let private keywordCacheFolder storageRoot =
@@ -729,9 +901,14 @@ Query: {query}
         Directory.CreateDirectory path |> ignore
         path
 
-    let private keywordCachePath storageRoot sourceFingerprint modelId schemaVersion =
+    let private keywordCachePath storageRoot sourceFingerprint (options: KeywordGenerationOptions) =
         let fileName =
-            [ sourceFingerprint; modelId; schemaVersion ] |> String.concat "\n" |> hashText
+            [ sourceFingerprint
+              options.modelId
+              options.schemaVersion
+              QaUseCaseProfile.fingerprint options.useCaseProfile ]
+            |> String.concat "\n"
+            |> hashText
 
         Path.Combine(keywordCacheFolder storageRoot, $"{fileName}.jsonl")
 
@@ -747,14 +924,16 @@ Query: {query}
             schemaVersion =
                 options.schemaVersion
                 |> Text.notEmpty
-                |> Option.defaultValue KeywordGenerationOptions.defaults.schemaVersion }
+                |> Option.defaultValue KeywordGenerationOptions.defaults.schemaVersion
+            useCaseProfile = QaUseCaseProfile.sanitize options.useCaseProfile }
 
     let private keywordCacheKey sourceFingerprint (options: KeywordGenerationOptions) passageIndex textHash =
         [ sourceFingerprint
           string passageIndex
           textHash
           options.modelId
-          options.schemaVersion ]
+          options.schemaVersion
+          QaUseCaseProfile.fingerprint options.useCaseProfile ]
         |> String.concat "\n"
         |> hashText
 
@@ -852,6 +1031,7 @@ Query: {query}
                 tryReadStringProperty "textHash" root,
                 tryReadStringProperty "modelId" root,
                 tryReadStringProperty "schemaVersion" root,
+                tryReadStringProperty "profileFingerprint" root,
                 tryReadStringListProperty "keywords" root
             with
             | Some key,
@@ -860,6 +1040,7 @@ Query: {query}
               Some textHash,
               Some modelId,
               Some schemaVersion,
+              Some profileFingerprint,
               Some keywords ->
                 Some
                     { key = key
@@ -868,6 +1049,7 @@ Query: {query}
                       textHash = textHash
                       modelId = modelId
                       schemaVersion = schemaVersion
+                      profileFingerprint = profileFingerprint
                       keywords = cleanKeywords 16 keywords }
             | _ -> None
         with _ ->
@@ -875,12 +1057,15 @@ Query: {query}
 
     let private loadKeywordCache path sourceFingerprint (options: KeywordGenerationOptions) =
         if File.Exists path then
+            let profileFingerprint = QaUseCaseProfile.fingerprint options.useCaseProfile
+
             File.ReadLines path
             |> Seq.choose tryReadKeywordCacheRecord
             |> Seq.filter (fun record ->
                 record.sourceFingerprint = sourceFingerprint
                 && record.modelId = options.modelId
-                && record.schemaVersion = options.schemaVersion)
+                && record.schemaVersion = options.schemaVersion
+                && record.profileFingerprint = profileFingerprint)
             |> Seq.map (fun record -> record.key, record)
             |> Map.ofSeq
         else
@@ -902,6 +1087,7 @@ Query: {query}
                            textHash = record.textHash
                            modelId = record.modelId
                            schemaVersion = record.schemaVersion
+                           profileFingerprint = record.profileFingerprint
                            keywords = record.keywords |}
                     )
 
@@ -915,7 +1101,7 @@ Query: {query}
         else
             normalized.Substring(0, 1000)
 
-    let private keywordPrompt (batch: FsColbert.PassageRef list) =
+    let private keywordPrompt (options: KeywordGenerationOptions) (batch: FsColbert.PassageRef list) =
         let payload =
             batch
             |> List.map (fun passage ->
@@ -923,13 +1109,35 @@ Query: {query}
                    text = promptPassageText passage.text |})
             |> fun items -> JsonSerializer.Serialize items
 
+        let profile = QaUseCaseProfile.sanitize options.useCaseProfile
+
+        let profileText =
+            seq {
+                yield $"Use case: {profile.displayName} ({profile.id})."
+
+                match profile.description with
+                | Some description -> yield $"Description: {description}"
+                | None -> ()
+
+                let hints = QaUseCaseProfile.renderHints profile
+
+                if not (String.IsNullOrWhiteSpace hints) then
+                    yield $"Domain hints: {hints}"
+
+                match profile.keywordInstruction with
+                | Some instruction -> yield $"Use-case keyword guidance: {instruction}"
+                | None -> ()
+            }
+            |> String.concat "\n"
+
         $"""
-Create compact lexical search keywords for customer-support retrieval passages.
+Create compact lexical search keywords for knowledge-source retrieval passages.
+{profileText}
 
 Return only a JSON object with one property, "items", whose value is an array.
 Each item must have:
 - passageIndex: the same integer passageIndex.
-- keywords: 6-14 short phrases, synonyms, abbreviations, product names, coverage terms, entities, and likely customer wording.
+- keywords: 6-14 short phrases, synonyms, abbreviations, product or feature names, entities, and likely user wording.
 
 Rules:
 - Use only facts supported by the passage text.
@@ -986,7 +1194,7 @@ Passages:
             opts.Reasoning <- reasoning
 
             let! response =
-                client.GetResponseAsync<PassageKeywordBatch>(keywordPrompt batch, opts)
+                client.GetResponseAsync<PassageKeywordBatch>(keywordPrompt options batch, opts)
                 |> Async.AwaitTask
 
             let requested = batch |> List.map _.index |> Set.ofList
@@ -1104,6 +1312,8 @@ Passages:
         [ $"keywords=enabled"
           $"keywordModel={options.modelId}"
           $"keywordSchema={options.schemaVersion}"
+          $"useCaseProfile={options.useCaseProfile.id}"
+          $"useCaseProfileHash={QaUseCaseProfile.fingerprint options.useCaseProfile}"
           $"keywordMetadataHash={hashText metadata}"
           $"tfidfTextWeight={FsColbert.TfidfOptions.defaults.textWeight}"
           $"tfidfKeywordWeight={FsColbert.TfidfOptions.defaults.keywordWeight}" ]
@@ -1129,9 +1339,9 @@ Passages:
                 return passages, disabledKeywordFingerprint
             else
                 let sourceFingerprintValue = sourceFingerprint source
+                let profileFingerprint = QaUseCaseProfile.fingerprint options.useCaseProfile
 
-                let cachePath =
-                    keywordCachePath storageRoot sourceFingerprintValue options.modelId options.schemaVersion
+                let cachePath = keywordCachePath storageRoot sourceFingerprintValue options
 
                 let cached = loadKeywordCache cachePath sourceFingerprintValue options
 
@@ -1204,6 +1414,7 @@ Passages:
                                           textHash = textHash
                                           modelId = options.modelId
                                           schemaVersion = options.schemaVersion
+                                          profileFingerprint = profileFingerprint
                                           keywords = keywords }))
                         }
 
@@ -1217,7 +1428,15 @@ Passages:
                     passageKeys
                     |> List.map (fun (passage, _, key) ->
                         let keywords =
-                            allRecords |> Map.tryFind key |> Option.map _.keywords |> Option.defaultValue []
+                            seq {
+                                yield! passage.keywords
+
+                                match allRecords |> Map.tryFind key with
+                                | Some record -> yield! record.keywords
+                                | None -> ()
+                            }
+                            |> Seq.toList
+                            |> cleanKeywords 32
 
                         { passage with keywords = keywords })
 
@@ -1339,25 +1558,33 @@ Passages:
     let InindexSource storageRoot report keywordOptions (source: KnowledgeSource) =
         async {
             match tryLoadPrebuiltIndex storageRoot source with
-            | Ok(Some _) -> report $"Prebuilt FsColbert index is available for {source.DisplayName}."
-            | _ ->
+            | Ok(Some _) ->
+                report $"Prebuilt FsColbert index is available for {source.DisplayName}."
+                return Ok()
+            | Error err -> return Error err
+            | Ok None ->
                 let! result = sourcePassages source
 
                 match result with
-                | Error _ -> ()
+                | Error err -> return Error err
                 | Ok passages ->
-                    let! passages, keywordFingerprint = attachKeywords storageRoot report keywordOptions source passages
+                    try
+                        let! passages, keywordFingerprint =
+                            attachKeywords storageRoot report keywordOptions source passages
 
-                    let path = sourceIndexPath storageRoot source keywordFingerprint
+                        let path = sourceIndexPath storageRoot source keywordFingerprint
 
-                    match tryLoadPersistedIndex path with
-                    | Ok(Some _) -> () // already indexed
-                    | _ ->
-                        report $"Preparing FsColbert model for {source.DisplayName}."
-                        let! encoder = loadEncoder storageRoot
-                        report $"Building FsColbert index for {source.DisplayName}."
-                        let! _ = buildIndexFromChunks report encoder passages path
-                        ()
+                        match tryLoadPersistedIndex path with
+                        | Ok(Some _) -> return Ok()
+                        | Ok None
+                        | Error _ ->
+                            report $"Preparing FsColbert model for {source.DisplayName}."
+                            let! encoder = loadEncoder storageRoot
+                            report $"Building FsColbert index for {source.DisplayName}."
+                            let! _ = buildIndexFromChunks report encoder passages path
+                            return Ok()
+                    with ex ->
+                        return Error $"Unable to build FsColbert index for {source.DisplayName}: {ex.Message}"
         }
 
     let loadIndex

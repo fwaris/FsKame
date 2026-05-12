@@ -6,10 +6,12 @@ open System.Threading.Channels
 open FSharp.Control
 open Fabulous
 open FsKame.WorkFlow
+open Microsoft.Extensions.AI
 open Microsoft.Maui.ApplicationModel
 open Microsoft.Maui.Devices
 open Microsoft.Maui.Graphics
 open Microsoft.Maui.Storage
+open OpenAI.Chat
 
 module Update =
     let private minLogFontSize = 10.
@@ -75,8 +77,24 @@ module Update =
 
         saveLog :: log |> List.truncate C.MAX_LOG
 
+    let private createChatClient (key: string) (modelId: string) : IChatClient =
+        let client = OpenAI.OpenAIClient(key)
+        client.GetResponsesClient().AsIChatClient(modelId)
+
     let private keywordOptions model =
-        KnowledgeSources.keywordOptionsFromApiKey model.elaborateIndexKeywords (Some model.openAiKey)
+        if not model.elaborateIndexKeywords then
+            FsKame.QA.KnowledgeSources.KeywordGenerationOptions.disabled
+        else
+            model.openAiKey
+            |> Text.notEmpty
+            |> Option.map (fun key ->
+                { FsKame.QA.KnowledgeSources.KeywordGenerationOptions.defaults with
+                    client = Some(createChatClient key C.NANO_MODEL)
+                    modelId = C.NANO_MODEL })
+            |> Option.defaultValue
+                { FsKame.QA.KnowledgeSources.KeywordGenerationOptions.defaults with
+                    client = None
+                    modelId = C.NANO_MODEL }
 
     let private postSources model =
         match model.bundle with
@@ -158,6 +176,20 @@ module Update =
                     status = Failed
                     chunkCount = 0
                     error = Some err }
+
+    let private failProcessingDocuments error (docs: PdfDocumentSource list) : PdfDocumentSource list =
+        docs
+        |> List.map (fun doc ->
+            match doc.status with
+            | Processing
+            | Queued ->
+                { doc with
+                    selected = false
+                    status = Failed
+                    chunkCount = 0
+                    error = Some error }
+            | Ready
+            | Failed -> doc)
 
     let private retryDocs ids (docs: PdfDocumentSource list) : PdfDocumentSource list =
         docs
@@ -384,11 +416,19 @@ module Update =
             postSources model
             model, Cmd.none
         | PdfProcessingCompleted(Error ex) ->
+            let error = $"Document processing failed: {ex.Message}"
+            let pdfDocuments = failProcessingDocuments error model.pdfDocuments
+
+            let log = error :: model.log |> List.truncate C.MAX_LOG
+
+            let model =
+                { model with
+                    pdfDocuments = pdfDocuments
+                    isBusy = false
+                    log = log }
+
             { model with
-                isBusy = false
-                log =
-                    $"Document processing failed: {ex.Message}" :: model.log
-                    |> List.truncate C.MAX_LOG },
+                log = savePdfLibraryWithLog model.pdfDocuments model.log },
             Cmd.none
         | PdfSelectionChanged(id, selected) ->
             if not (canChangeSourceSelection model) then

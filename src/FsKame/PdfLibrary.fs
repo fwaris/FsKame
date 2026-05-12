@@ -63,10 +63,10 @@ module PdfLibrary =
         | "mkdn" -> MarkdownFile
         | _ -> MarkdownFile
 
-    let private sourceKind kind =
+    let private qaSourceKind kind =
         match kind with
-        | PdfFile -> Pdf
-        | MarkdownFile -> Markdown
+        | PdfFile -> FsKame.QA.KnowledgeSourceKind.Pdf
+        | MarkdownFile -> FsKame.QA.KnowledgeSourceKind.Markdown
 
     let private readPassages (doc: PdfDocumentSource) =
         let source =
@@ -282,17 +282,24 @@ module PdfLibrary =
 
             match result with
             | Ok passages ->
-                let source =
-                    { kind = sourceKind doc.kind
+                let source: FsKame.QA.KnowledgeSource =
+                    { FsKame.QA.KnowledgeSource.kind = qaSourceKind doc.kind
                       location = doc.storedPath
                       enabled = true }
 
-                do! KnowledgeSources.InindexSource report keywordOptions source
-
-                return
-                    { id = doc.id
-                      chunkCount = passages.Length
-                      error = None }
+                match!
+                    FsKame.QA.KnowledgeSources.InindexSource FileSystem.AppDataDirectory report keywordOptions source
+                with
+                | Ok() ->
+                    return
+                        { id = doc.id
+                          chunkCount = passages.Length
+                          error = None }
+                | Error err ->
+                    return
+                        { id = doc.id
+                          chunkCount = 0
+                          error = Some err }
             | Error err ->
                 return
                     { id = doc.id

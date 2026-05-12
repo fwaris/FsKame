@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
+    <Compile Include="UseCase.fs" />
     <Compile Include="Text.fs" />
     <Compile Include="MemoryTypes.fs" />
     <Compile Include="KnowledgeSources.fs" />

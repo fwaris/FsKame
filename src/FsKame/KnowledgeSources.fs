@@ -104,6 +104,7 @@ module KnowledgeSources =
         match source.kind with
         | Pdf -> FsColbert.PdfDocuments.readPassages fsKameChunkOptions passageSource source.location
         | Markdown -> FsColbert.MarkdownDocuments.readPassages fsKameChunkOptions passageSource source.location
+        | Json -> FsColbert.MarkdownDocuments.readPassages fsKameChunkOptions passageSource source.location
 
     let loadChunks (sources: KnowledgeSource list) : Async<SourceChunk list * string list> =
         async {
@@ -139,6 +140,7 @@ module KnowledgeSources =
         match sourceKind with
         | Pdf -> "pdf"
         | Markdown -> "markdown"
+        | Json -> "json"
 
     let private sourceFromLocation (sources: KnowledgeSource list) (location: string) : KnowledgeSource =
         sources
@@ -505,7 +507,7 @@ module KnowledgeSources =
                 try
                     let prompt =
                         $"""
-Create compact retrieval signals for searching PDF passages.
+Create compact retrieval signals for searching selected knowledge-source passages.
 
 Return JSON matching the schema:
 - terms: at most 8 content keywords, aliases, or technical terms likely to appear in relevant passages. Avoid generic action words such as summarize, explain, describe, question, answer, paper, document, and PDF.
@@ -945,12 +947,12 @@ Query: {query}
             |> fun items -> JsonSerializer.Serialize items
 
         $"""
-Create compact lexical search keywords for customer-support retrieval passages.
+Create compact lexical search keywords for knowledge-source retrieval passages.
 
 Return only a JSON object with one property, "items", whose value is an array.
 Each item must have:
 - passageIndex: the same integer passageIndex.
-- keywords: 6-14 short phrases, synonyms, abbreviations, product names, coverage terms, entities, and likely customer wording.
+- keywords: 6-14 short phrases, synonyms, abbreviations, product or feature names, entities, and likely user wording.
 
 Rules:
 - Use only facts supported by the passage text.
@@ -1374,24 +1376,31 @@ Passages:
     let InindexSource report keywordOptions (source: KnowledgeSource) =
         async {
             match tryLoadPrebuiltIndex source with
-            | Ok(Some _) -> report $"Prebuilt FsColbert index is available for {source.DisplayName}."
-            | _ ->
+            | Ok(Some _) ->
+                report $"Prebuilt FsColbert index is available for {source.DisplayName}."
+                return Ok()
+            | Error err -> return Error err
+            | Ok None ->
                 let! result = sourcePassages source
 
                 match result with
-                | Error _ -> ()
+                | Error err -> return Error err
                 | Ok passages ->
-                    let! passages, keywordFingerprint = attachKeywords report keywordOptions source passages
-                    let path = sourceIndexPath source keywordFingerprint
+                    try
+                        let! passages, keywordFingerprint = attachKeywords report keywordOptions source passages
+                        let path = sourceIndexPath source keywordFingerprint
 
-                    match tryLoadPersistedIndex path with
-                    | Ok(Some _) -> () // already indexed
-                    | _ ->
-                        report $"Preparing FsColbert model for {source.DisplayName}."
-                        let! encoder = loadEncoder ()
-                        report $"Building FsColbert index for {source.DisplayName}."
-                        let! _ = buildIndexFromChunks report encoder passages path
-                        ()
+                        match tryLoadPersistedIndex path with
+                        | Ok(Some _) -> return Ok()
+                        | Ok None
+                        | Error _ ->
+                            report $"Preparing FsColbert model for {source.DisplayName}."
+                            let! encoder = loadEncoder ()
+                            report $"Building FsColbert index for {source.DisplayName}."
+                            let! _ = buildIndexFromChunks report encoder passages path
+                            return Ok()
+                    with ex ->
+                        return Error $"Unable to build FsColbert index for {source.DisplayName}: {ex.Message}"
         }
 
     let loadIndex

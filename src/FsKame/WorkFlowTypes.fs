@@ -10,6 +10,7 @@ open RTFlow
 type SourceKind =
     | Pdf
     | Markdown
+    | Json
 
 type KnowledgeSource =
     { kind: SourceKind
@@ -20,6 +21,7 @@ type KnowledgeSource =
         match this.kind with
         | Pdf -> $"PDF: {this.location}"
         | Markdown -> $"Markdown: {this.location}"
+        | Json -> $"JSON: {this.location}"
 
 type SourceChunk =
     { source: KnowledgeSource

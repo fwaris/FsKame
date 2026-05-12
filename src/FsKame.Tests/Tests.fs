@@ -87,6 +87,7 @@ let private testSourceKindId sourceKind =
     match sourceKind with
     | Pdf -> "pdf"
     | Markdown -> "markdown"
+    | Json -> "json"
 
 let private testSourceFingerprint (source: KnowledgeSource) =
     let filePart =
@@ -99,12 +100,17 @@ let private testSourceFingerprint (source: KnowledgeSource) =
 
     $"{testSourceKindId source.kind}:{filePart}"
 
-let private testKeywordCachePath storageRoot sourceFingerprint modelId schemaVersion =
+let private testKeywordCachePath storageRoot sourceFingerprint (options: KnowledgeSources.KeywordGenerationOptions) =
     let folder = Path.Combine(storageRoot, "FsKame", "FsColbert", "KeywordCache")
     Directory.CreateDirectory folder |> ignore
 
     let fileName =
-        [ sourceFingerprint; modelId; schemaVersion ] |> String.concat "\n" |> hashText
+        [ sourceFingerprint
+          options.modelId
+          options.schemaVersion
+          QaUseCaseProfile.fingerprint options.useCaseProfile ]
+        |> String.concat "\n"
+        |> hashText
 
     Path.Combine(folder, $"{fileName}.jsonl")
 
@@ -123,12 +129,12 @@ let private seedKeywordCache
           string passage.index
           textHash
           options.modelId
-          options.schemaVersion ]
+          options.schemaVersion
+          QaUseCaseProfile.fingerprint options.useCaseProfile ]
         |> String.concat "\n"
         |> hashText
 
-    let cachePath =
-        testKeywordCachePath storageRoot sourceFingerprint options.modelId options.schemaVersion
+    let cachePath = testKeywordCachePath storageRoot sourceFingerprint options
 
     let line =
         JsonSerializer.Serialize(
@@ -138,6 +144,7 @@ let private seedKeywordCache
                textHash = textHash
                modelId = options.modelId
                schemaVersion = options.schemaVersion
+               profileFingerprint = QaUseCaseProfile.fingerprint options.useCaseProfile
                keywords = keywords |}
         )
 
@@ -185,6 +192,61 @@ let ``getSynonyms handles empty query`` () =
     |> Async.RunSynchronously
 
 [<Fact>]
+let ``query post-processing keeps domain expansion in supplied use-case profile`` () =
+    let profile =
+        { QaUseCaseProfile.generic with
+            id = "test-domain"
+            displayName = "Test Domain"
+            voiceReplacements =
+                [ { pattern = @"\bmedicare\s+gap\b"
+                    replacement = "Medigap" } ]
+            queryExpansionRules =
+                [ { triggers = [ "medigap" ]
+                    terms = [ "medicare"; "supplement"; "plan" ] } ] }
+
+    let generic = Text.QueryPostProcessing.forVoiceLikeRetrieval "medicare gap"
+
+    let profiled =
+        Text.QueryPostProcessing.forVoiceLikeRetrievalWithProfile profile "medicare gap"
+
+    Assert.DoesNotContain("supplement", generic.searchTerms)
+    Assert.Contains("supplement", profiled.searchTerms)
+    Assert.Contains("Medigap", profiled.normalizedQuery)
+
+[<Fact>]
+let ``json knowledge source can be loaded as generic QA content`` () =
+    async {
+        let path =
+            Path.Combine(Path.GetTempPath(), $"fskame-json-source-{Guid.NewGuid():N}.json")
+
+        File.WriteAllText(
+            path,
+            JsonSerializer.Serialize(
+                {| id = "test-source"
+                   title = "Test Source"
+                   documents =
+                    [ {| id = "1"
+                         title = "Answer label: 1"
+                         text = "Use the scheduling guide for emergency dental appointments."
+                         keywords = [ "appointment lookup" ] |} ] |}
+            )
+        )
+
+        let source =
+            { kind = Json
+              location = path
+              enabled = true }
+
+        let! retrieval, errors = KnowledgeSources.loadInternalIndex [ source ]
+
+        Assert.Empty errors
+        let chunk = Assert.Single retrieval.chunks
+        Assert.Contains("Answer label: 1", chunk.text)
+        Assert.Contains("emergency dental appointments", chunk.text)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
 let ``keyword schema rejection does not block keyword attachment`` () =
     async {
         let source =
@@ -193,8 +255,8 @@ let ``keyword schema rejection does not block keyword attachment`` () =
               enabled = true }
 
         let passages =
-            [ keywordPassage source 0 "The policy covers emergency dental care."
-              keywordPassage source 1 "The policy excludes cosmetic dental care." ]
+            [ keywordPassage source 0 "The guide covers emergency dental scheduling."
+              keywordPassage source 1 "The guide excludes cosmetic dental scheduling." ]
 
         let logs = ResizeArray<string>()
         let storageRoot = tempStorageRoot ()
@@ -231,18 +293,18 @@ let ``keyword schema rejection keeps cached keyword records`` () =
               enabled = true }
 
         let passages =
-            [ keywordPassage source 0 "The policy covers emergency dental care."
-              keywordPassage source 1 "The policy excludes cosmetic dental care." ]
+            [ keywordPassage source 0 "The guide covers emergency dental scheduling."
+              keywordPassage source 1 "The guide excludes cosmetic dental scheduling." ]
 
         let options =
             keywordOptions schemaVersion (new InvalidJsonSchemaChatClient() :> IChatClient)
 
-        seedKeywordCache storageRoot source options passages.Head [ "cached coverage term" ]
+        seedKeywordCache storageRoot source options passages.Head [ "cached scheduling term" ]
         let logs = ResizeArray<string>()
 
         let! enriched, _ = KnowledgeSources.attachKeywords storageRoot logs.Add options source passages
 
-        Assert.Equal<string list>([ "cached coverage term" ], enriched.Head.keywords)
+        Assert.Equal<string list>([ "cached scheduling term" ], enriched.Head.keywords)
         Assert.Empty(enriched.Tail.Head.keywords)
 
         let schemaRejectionLogs =

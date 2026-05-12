@@ -45,6 +45,7 @@ module QaAgent =
             match source.kind with
             | Pdf -> FsKame.QA.KnowledgeSourceKind.Pdf
             | Markdown -> FsKame.QA.KnowledgeSourceKind.Markdown
+            | Json -> FsKame.QA.KnowledgeSourceKind.Json
 
         { FsKame.QA.KnowledgeSource.kind = kind
           location = source.location
@@ -55,6 +56,7 @@ module QaAgent =
             match source.kind with
             | FsKame.QA.KnowledgeSourceKind.Pdf -> Pdf
             | FsKame.QA.KnowledgeSourceKind.Markdown -> Markdown
+            | FsKame.QA.KnowledgeSourceKind.Json -> Json
 
         { kind = kind
           location = source.location
