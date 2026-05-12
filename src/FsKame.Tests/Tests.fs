@@ -44,6 +44,22 @@ type InvalidJsonSchemaChatClient() =
         member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
+type CountingChatClient(responseText: string) =
+    let mutable count = 0
+
+    member _.Count = count
+
+    interface IChatClient with
+        member _.Dispose() = ()
+        member _.GetService(serviceType: Type, serviceKey: obj) = null
+
+        member _.GetResponseAsync(chatMessages, options, cancellationToken) =
+            count <- count + 1
+            ChatResponse(ChatMessage(ChatRole.Assistant, responseText)) |> Task.FromResult
+
+        member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
+            asyncSeq { yield ChatResponseUpdate() }
+
 type FakeQaToolHost() =
     interface IQaToolHost with
         member _.Report _ = ()
@@ -56,6 +72,26 @@ type FakeQaToolHost() =
 
         member _.SearchBlackboardAsync(_, _) =
             Task.FromResult("No blackboard context.")
+
+type FakeContextProvider(source: KnowledgeSource) =
+    interface IQaContextProvider with
+        member _.ProviderId = "fake.context"
+        member _.DisplayName = "Fake Context"
+        member _.Sources = [ source ]
+
+        member _.LoadAsync _ = Task.FromResult([])
+
+        member _.RetrieveAsync(request, _) =
+            [ { source = source
+                index = 0
+                text = $"Fake context for {request.query}."
+                score = 1.0f } ]
+            |> Task.FromResult
+
+        member _.InventoryAsync _ =
+            Task.FromResult("Fake Context inventory.")
+
+        member _.DisposeAsync() = ValueTask()
 
 let private keywordPassage (source: KnowledgeSource) index text : FsColbert.PassageRef =
     { sourceId = source.location
@@ -245,6 +281,75 @@ let ``json knowledge source can be loaded as generic QA content`` () =
         Assert.Contains("emergency dental appointments", chunk.text)
     }
     |> Async.RunSynchronously
+
+[<Fact>]
+let ``qa session composes injected context providers`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "fake://source"
+              enabled = true }
+
+        let provider = FakeContextProvider source :> IQaContextProvider
+        let storageRoot = tempStorageRoot ()
+
+        let options =
+            { QaSessionOptions.create storageRoot with
+                autoWriteback = false }
+
+        let session = new QaSession(options)
+        let! errors = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "composition"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Empty errors
+        Assert.Single answer.context |> ignore
+        Assert.Contains("composition", answer.context.Head.text)
+        Assert.Equal<KnowledgeSource list>([ source ], answer.inventory)
+
+        do! (session :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
+
+[<Fact>]
+let ``qa session skips llm tool planner when only built-in context tools are available`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "fake://source"
+              enabled = true }
+
+        let planner = new CountingChatClient("""{"calls":[]}""")
+        let provider = FakeContextProvider source :> IQaContextProvider
+        let storageRoot = tempStorageRoot ()
+
+        let options =
+            { QaSessionOptions.create storageRoot with
+                autoWriteback = false
+                clients =
+                    { QaModelClients.none with
+                        toolPlanner = Some planner } }
+
+        let session = new QaSession(options)
+        let! _ = (session :> IQaOrchestrator).ConfigureAsync([ provider ], CancellationToken.None)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "composition"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! _ = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal(0, planner.Count)
+
+        do! (session :> IAsyncDisposable).DisposeAsync().AsTask()
+    }
 
 [<Fact>]
 let ``keyword schema rejection does not block keyword attachment`` () =

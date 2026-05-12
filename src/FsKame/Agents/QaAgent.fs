@@ -15,7 +15,7 @@ module QaAgent =
         { bus: WBus<FlowMsg, AgentMsg>
           apiKey: string
           oracleModel: string
-          session: FsKame.QA.QaSession option
+          session: FsKame.QA.IQaOrchestrator option
           retrievalMode: FsKame.RetrievalMode
           sources: KnowledgeSource list }
 
@@ -79,7 +79,9 @@ module QaAgent =
               sensitive = judgement.riskFlags.sensitive
               conflictLikely = judgement.riskFlags.conflictLikely } }
 
-    let private createSession (st: State) flags =
+    let private storageRoot () = FileSystem.AppDataDirectory
+
+    let private createSession (st: State) flags : FsKame.QA.IQaOrchestrator =
         let clients: FsKame.QA.QaModelClients =
             if String.IsNullOrWhiteSpace st.apiKey then
                 FsKame.QA.QaModelClients.none
@@ -91,7 +93,7 @@ module QaAgent =
                   toolPlanner = Some small
                   answerGenerator = Some large }
 
-        let storageRoot = FileSystem.AppDataDirectory
+        let storageRoot = storageRoot ()
 
         let options =
             { FsKame.QA.QaSessionOptions.create storageRoot with
@@ -100,12 +102,36 @@ module QaAgent =
                 answerModelId = st.oracleModel
                 keywordModelId = C.NANO_MODEL
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
+                logTimings = true
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
                 useLexicalFilter = flags.useLexicalFilter
                 report = fun msg -> st.bus.PostToAgent(Ag_Log msg) }
 
-        new FsKame.QA.QaSession(options)
+        new FsKame.QA.QaSession(options) :> FsKame.QA.IQaOrchestrator
+
+    let private createContextProvider st flags mode sources : FsKame.QA.IQaContextProvider =
+        let qaMode = toQaMode mode
+        let qaSources = sources |> List.map toQaSource
+
+        let queryExpansionClient =
+            if String.IsNullOrWhiteSpace st.apiKey then
+                None
+            else
+                Some(createClient st.apiKey C.NANO_MODEL)
+
+        let options =
+            { FsKame.QA.FsColbertContextProviderOptions.create (storageRoot ()) qaMode qaSources with
+                queryExpansionClient = queryExpansionClient
+                disposeQueryExpansionClient = true
+                keywordModelId = C.NANO_MODEL
+                elaborateIndexKeywords = flags.elaborateIndexKeywords
+                logExpansions = flags.logExpansions
+                logChunks = flags.logChunks
+                useLexicalFilter = flags.useLexicalFilter
+                report = fun msg -> st.bus.PostToAgent(Ag_Log msg) }
+
+        new FsKame.QA.FsColbertContextProvider(options) :> FsKame.QA.IQaContextProvider
 
     let private ensureSession (st: State) =
         match st.session with
@@ -181,20 +207,17 @@ module QaAgent =
                 | Some session -> do! (session :> IAsyncDisposable).DisposeAsync().AsTask() |> Async.AwaitTask
                 | None -> ()
 
-                let session =
-                    createSession
-                        st
-                        { logExpansions = flags.logExpansions
-                          logChunks = flags.logChunks
-                          useLexicalFilter = flags.useLexicalFilter
-                          elaborateIndexKeywords = flags.elaborateIndexKeywords }
+                let flags: SourceFlags =
+                    { logExpansions = flags.logExpansions
+                      logChunks = flags.logChunks
+                      useLexicalFilter = flags.useLexicalFilter
+                      elaborateIndexKeywords = flags.elaborateIndexKeywords }
 
-                let qaMode = toQaMode mode
-                let qaSources = sources |> List.map toQaSource
+                let session = createSession st flags
 
-                let! errors =
-                    session.LoadSourcesAsync(qaMode, qaSources, CancellationToken.None)
-                    |> Async.AwaitTask
+                let provider = createContextProvider st flags mode sources
+
+                let! errors = session.ConfigureAsync([ provider ], CancellationToken.None) |> Async.AwaitTask
 
                 for err in errors do
                     st.bus.PostToAgent(Ag_Log err)

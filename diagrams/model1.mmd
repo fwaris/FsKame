@@ -1,0 +1,27 @@
+flowchart TB
+    Host["Host App / UI\nVoice app, text app, admin app"]
+    PackageLoader["Package Loader\nDiscovers use-case packages"]
+    Orchestrator["FsKame.Orchestration\nTurn planning, tool use, answer flow"]
+    Memory["FsKame.Memory\nDurable memory, recall, writeback"]
+    Abstractions["FsKame.Abstractions\nShared contracts"]
+    Retrieval["FsKame.Retrieval.FsColbert\nIndexes, retrieval, prebuilt index loading"]
+    Tools["Tool Providers\nExternal function/tool DLLs"]
+    Models["Model Clients\nOpenAI or other providers"]
+    Packages["Use-Case Packages\nprofiles, indexes, tools, UI metadata"]
+
+    Host --> PackageLoader
+    PackageLoader --> Packages
+    PackageLoader --> Retrieval
+    PackageLoader --> Tools
+    Host --> Orchestrator
+    Orchestrator --> Memory
+    Orchestrator --> Retrieval
+    Orchestrator --> Tools
+    Orchestrator --> Models
+
+    Memory --> Abstractions
+    Orchestrator --> Abstractions
+    Retrieval --> Abstractions
+    Tools --> Abstractions
+    PackageLoader --> Abstractions
+

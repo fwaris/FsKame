@@ -56,7 +56,10 @@ type private SourceInventoryTool(host: IQaToolHost) =
     interface IQaTool with
         member _.PluginName = "FsKameTools"
         member _.Name = "source_inventory"
-        member _.Description = "Lists the selected PDF and Markdown sources available to this QA session."
+
+        member _.Description =
+            "Lists the selected PDF and Markdown sources available to this QA session."
+
         member _.Parameters = []
 
         member _.InvokeAsync(_, cancellationToken) =
@@ -117,10 +120,7 @@ module QaToolLoader =
     let private providerTypes (assembly: Assembly) =
         try
             assembly.GetTypes()
-            |> Array.filter (fun t ->
-                t.IsPublic
-                && not t.IsAbstract
-                && typeof<IQaToolProvider>.IsAssignableFrom t)
+            |> Array.filter (fun t -> t.IsPublic && not t.IsAbstract && typeof<IQaToolProvider>.IsAssignableFrom t)
             |> Array.toList
         with _ ->
             []
@@ -163,11 +163,21 @@ module QaToolLoader =
 
         List.ofSeq accepted, List.ofSeq logs
 
-    let load host (providerFolder: string option) =
+    let loadWithProviders host (providerFolder: string option) (extraProviders: IQaToolProvider list) =
         let tools = ResizeArray<IQaTool>()
         let logs = ResizeArray<string>()
 
         builtInTools host |> List.iter tools.Add
+
+        for provider in extraProviders do
+            try
+                if provider.ContractVersion <> contractVersion then
+                    logs.Add
+                        $"Skipping provider {provider.GetType().FullName}: contract version {provider.ContractVersion} is not supported."
+                else
+                    provider.GetTools host |> List.iter tools.Add
+            with ex ->
+                logs.Add $"Provider {provider.GetType().FullName} failed to create tools: {ex.Message}"
 
         match providerFolder with
         | None -> ()
@@ -192,3 +202,6 @@ module QaToolLoader =
 
         { tools = tools
           logs = List.ofSeq logs }
+
+    let load host (providerFolder: string option) =
+        loadWithProviders host providerFolder []

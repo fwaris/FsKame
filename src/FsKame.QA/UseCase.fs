@@ -27,6 +27,38 @@ type QaUseCaseProfile =
       answerSystemInstruction: string option
       judgeSystemInstruction: string option }
 
+[<CLIMutable>]
+type QaUseCaseContextManifest =
+    { id: string
+      provider: string
+      displayName: string
+      assetPath: string
+      enabled: bool }
+
+[<CLIMutable>]
+type QaUseCaseToolManifest =
+    { id: string
+      assemblyPath: string
+      enabled: bool }
+
+[<CLIMutable>]
+type QaUseCaseUiManifest =
+    { id: string
+      kind: string
+      assetPath: string }
+
+[<CLIMutable>]
+type QaUseCasePackageManifest =
+    { contractVersion: int
+      id: string
+      version: string
+      displayName: string
+      description: string option
+      behaviorProfile: QaUseCaseProfile
+      contexts: QaUseCaseContextManifest list
+      tools: QaUseCaseToolManifest list
+      ui: QaUseCaseUiManifest list }
+
 module QaUseCaseProfile =
     let private notEmpty (value: string) =
         if String.IsNullOrWhiteSpace value then
@@ -144,3 +176,68 @@ module QaUseCaseProfile =
         sha.ComputeHash bytes
         |> Convert.ToHexString
         |> fun hash -> hash.ToLowerInvariant()
+
+module QaUseCasePackageManifest =
+    let currentContractVersion = 1
+
+    let private jsonOptions =
+        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+        options.AllowTrailingCommas <- true
+        options.ReadCommentHandling <- JsonCommentHandling.Skip
+        options
+
+    let private notEmpty (value: string) =
+        if String.IsNullOrWhiteSpace value then
+            None
+        else
+            Some(value.Trim())
+
+    let empty id displayName =
+        { contractVersion = currentContractVersion
+          id = id
+          version = "1.0.0"
+          displayName = displayName
+          description = None
+          behaviorProfile =
+            { QaUseCaseProfile.generic with
+                id = id
+                displayName = displayName }
+          contexts = []
+          tools = []
+          ui = [] }
+
+    let sanitize (manifest: QaUseCasePackageManifest) =
+        let profile =
+            if isNull (box manifest.behaviorProfile) then
+                QaUseCaseProfile.generic
+            else
+                QaUseCaseProfile.sanitize manifest.behaviorProfile
+
+        { manifest with
+            contractVersion =
+                if manifest.contractVersion <= 0 then
+                    currentContractVersion
+                else
+                    manifest.contractVersion
+            id = profile.id
+            displayName = profile.displayName
+            version = manifest.version |> notEmpty |> Option.defaultValue "1.0.0"
+            description = manifest.description |> Option.bind notEmpty
+            behaviorProfile = profile
+            contexts = manifest.contexts |> Option.ofObj |> Option.defaultValue []
+            tools = manifest.tools |> Option.ofObj |> Option.defaultValue []
+            ui = manifest.ui |> Option.ofObj |> Option.defaultValue [] }
+
+    let fromJsonText (json: string) =
+        JsonSerializer.Deserialize<QaUseCasePackageManifest>(json, jsonOptions)
+        |> Option.ofObj
+        |> Option.map sanitize
+
+    let tryLoad path =
+        try
+            if String.IsNullOrWhiteSpace path || not (File.Exists path) then
+                None
+            else
+                File.ReadAllText path |> fromJsonText
+        with _ ->
+            None
