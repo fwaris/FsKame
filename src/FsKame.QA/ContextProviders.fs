@@ -10,7 +10,9 @@ type FsColbertContextProviderOptions =
       retrievalMode: RetrievalMode
       sources: KnowledgeSource list
       queryExpansionClient: IChatClient option
+      keywordGenerationClient: IChatClient option
       disposeQueryExpansionClient: bool
+      disposeKeywordGenerationClient: bool
       useCaseProfile: QaUseCaseProfile
       keywordModelId: string
       elaborateIndexKeywords: bool
@@ -25,7 +27,9 @@ module FsColbertContextProviderOptions =
           retrievalMode = retrievalMode
           sources = sources
           queryExpansionClient = None
+          keywordGenerationClient = None
           disposeQueryExpansionClient = false
+          disposeKeywordGenerationClient = false
           useCaseProfile = QaUseCaseProfile.generic
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
@@ -60,7 +64,7 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
                         let keywordOptions =
                             { KnowledgeSources.KeywordGenerationOptions.defaults with
                                 enabled = options.elaborateIndexKeywords
-                                client = options.queryExpansionClient
+                                client = options.keywordGenerationClient
                                 modelId = options.keywordModelId
                                 useCaseProfile = options.useCaseProfile }
 
@@ -96,5 +100,8 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
 
             if options.disposeQueryExpansionClient then
                 options.queryExpansionClient |> Option.iter _.Dispose()
+
+            if options.disposeKeywordGenerationClient then
+                options.keywordGenerationClient |> Option.iter _.Dispose()
 
             ValueTask()

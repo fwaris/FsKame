@@ -194,6 +194,7 @@ Common options:
                 answerModelId = optionValue "answer-model" QaDefaults.answerModel parsed
                 keywordModelId = optionValue "small-model" QaDefaults.nanoModel parsed
                 elaborateIndexKeywords = not (hasFlag "no-index-elaboration" parsed)
+                enableQueryExpansion = hasFlag "llm-query-expansion" parsed
                 toolProviderDirectory = optionValues "tool-dir" parsed |> List.tryLast
                 autoWriteback = autoWriteback
                 report = fun msg -> Console.Error.WriteLine msg }

@@ -24,7 +24,14 @@ module StateMachine =
     let private startAgents ss =
         async {
             AppAgent.start ss.mailbox ss.bus
-            QaAgent.start ss.apiKey ss.oracleModel ss.bus
+
+            let flags: QaAgent.SourceFlags =
+                { logExpansions = ss.logExpansions
+                  logChunks = ss.logChunks
+                  useLexicalFilter = ss.useLexicalFilter
+                  elaborateIndexKeywords = ss.elaborateIndexKeywords }
+
+            QaAgent.start ss.apiKey ss.oracleModel ss.retrievalMode ss.sources flags ss.bus
             VoiceAgent.start ss.apiKey ss.conn ss.bus
         }
 

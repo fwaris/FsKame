@@ -352,6 +352,56 @@ let ``qa session skips llm tool planner when only built-in context tools are ava
     }
 
 [<Fact>]
+let ``qa session does not call llm query expansion by default`` () =
+    task {
+        let path =
+            Path.Combine(Path.GetTempPath(), $"fskame-no-query-expansion-{Guid.NewGuid():N}.json")
+
+        File.WriteAllText(
+            path,
+            JsonSerializer.Serialize(
+                {| documents =
+                    [ {| id = "1"
+                         title = "Policy"
+                         text = "The debug answer is BLUE-42."
+                         keywords = [] |} ] |}
+            )
+        )
+
+        let expansion =
+            new CountingChatClient(
+                """{"terms":["BLUE-42"],"rewrittenQueries":["BLUE-42"],"sectionName":null,"queryType":"Question"}"""
+            )
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                clients =
+                    { QaModelClients.none with
+                        queryExpansion = Some expansion } }
+
+        use session = new QaSession(options)
+
+        let source =
+            { kind = Json
+              location = path
+              enabled = true }
+
+        let! _ = session.LoadSourcesAsync(InternalDocumentIndex, [ source ], CancellationToken.None)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What is the debug answer?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal(0, expansion.Count)
+        Assert.Contains("BLUE-42", answer.context.Head.text)
+    }
+
+[<Fact>]
 let ``keyword schema rejection does not block keyword attachment`` () =
     async {
         let source =

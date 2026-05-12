@@ -33,6 +33,7 @@ type QaSessionOptions =
       contextProviders: IQaContextProvider list
       toolProviders: IQaToolProvider list
       enableToolPlanner: bool
+      enableQueryExpansion: bool
       logTimings: bool
       logExpansions: bool
       logChunks: bool
@@ -55,6 +56,7 @@ module QaSessionOptions =
           contextProviders = []
           toolProviders = []
           enableToolPlanner = true
+          enableQueryExpansion = false
           logTimings = false
           logExpansions = false
           logChunks = false
@@ -587,7 +589,12 @@ Use an empty calls array when no tool is needed."""
         task {
             let providerOptions =
                 { FsColbertContextProviderOptions.create options.storageRoot mode sources with
-                    queryExpansionClient = options.clients.queryExpansion
+                    queryExpansionClient =
+                        if options.enableQueryExpansion then
+                            options.clients.queryExpansion
+                        else
+                            None
+                    keywordGenerationClient = options.clients.queryExpansion
                     useCaseProfile = options.useCaseProfile
                     keywordModelId = options.keywordModelId
                     elaborateIndexKeywords = options.elaborateIndexKeywords

@@ -11,25 +11,20 @@ open RTFlow
 open RTFlow.Functions
 
 module QaAgent =
-    type State =
-        { bus: WBus<FlowMsg, AgentMsg>
-          apiKey: string
-          oracleModel: string
-          session: FsKame.QA.IQaOrchestrator option
-          retrievalMode: FsKame.RetrievalMode
-          sources: KnowledgeSource list }
-
     type SourceFlags =
         { logExpansions: bool
           logChunks: bool
           useLexicalFilter: bool
           elaborateIndexKeywords: bool }
 
-    let private defaultFlags =
-        { logExpansions = false
-          logChunks = false
-          useLexicalFilter = true
-          elaborateIndexKeywords = true }
+    type State =
+        { bus: WBus<FlowMsg, AgentMsg>
+          apiKey: string
+          oracleModel: string
+          session: FsKame.QA.IQaOrchestrator option
+          retrievalMode: FsKame.RetrievalMode
+          sources: KnowledgeSource list
+          flags: SourceFlags }
 
     let private createClient (key: string) (modelId: string) : IChatClient =
         let client = OpenAI.OpenAIClient(key)
@@ -114,7 +109,7 @@ module QaAgent =
         let qaMode = toQaMode mode
         let qaSources = sources |> List.map toQaSource
 
-        let queryExpansionClient =
+        let keywordGenerationClient =
             if String.IsNullOrWhiteSpace st.apiKey then
                 None
             else
@@ -122,8 +117,9 @@ module QaAgent =
 
         let options =
             { FsKame.QA.FsColbertContextProviderOptions.create (storageRoot ()) qaMode qaSources with
-                queryExpansionClient = queryExpansionClient
-                disposeQueryExpansionClient = true
+                queryExpansionClient = None
+                keywordGenerationClient = keywordGenerationClient
+                disposeKeywordGenerationClient = true
                 keywordModelId = C.NANO_MODEL
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
                 logExpansions = flags.logExpansions
@@ -133,12 +129,34 @@ module QaAgent =
 
         new FsKame.QA.FsColbertContextProvider(options) :> FsKame.QA.IQaContextProvider
 
+    let private configureSession st flags mode sources (session: FsKame.QA.IQaOrchestrator) =
+        async {
+            let provider = createContextProvider st flags mode sources
+            let! errors = session.ConfigureAsync([ provider ], CancellationToken.None) |> Async.AwaitTask
+
+            for err in errors do
+                st.bus.PostToAgent(Ag_Log err)
+
+            st.bus.PostToAgent(
+                Ag_Log
+                    $"QA session configured: mode={FsKame.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords}."
+            )
+
+            return session
+        }
+
     let private ensureSession (st: State) =
-        match st.session with
-        | Some session -> st, session
-        | None ->
-            let session = createSession st defaultFlags
-            { st with session = Some session }, session
+        async {
+            match st.session with
+            | Some session -> return st, session
+            | None ->
+                let session = createSession st st.flags
+                let! session = configureSession st st.flags st.retrievalMode st.sources session
+                return { st with session = Some session }, session
+        }
+
+    let private sameSourceConfiguration st mode sources flags =
+        st.retrievalMode = mode && st.sources = sources && st.flags = flags
 
     let private createMemoryContext
         (request: MemoryRequest)
@@ -159,10 +177,8 @@ module QaAgent =
           timedOut = false
           createdAt = DateTimeOffset.UtcNow }
 
-    let private answerRequest (st: State) (request: MemoryRequest) =
+    let private answerRequest (st: State) (session: FsKame.QA.IQaOrchestrator) (request: MemoryRequest) =
         async {
-            let _st, session = ensureSession st
-
             try
                 let qaRequest: FsKame.QA.QaTurnRequest =
                     { turnId = request.snapshot.turnId
@@ -175,6 +191,17 @@ module QaAgent =
                 let chunks: SourceChunk list = answer.context |> List.map toWorkflowChunk
                 let inventory: KnowledgeSource list = answer.inventory |> List.map toWorkflowSource
                 let context = createMemoryContext request chunks inventory
+
+                let firstChunk =
+                    chunks
+                    |> List.tryHead
+                    |> Option.map (fun chunk -> FsKame.Text.truncate 180 chunk.text)
+                    |> Option.defaultValue "none"
+
+                st.bus.PostToAgent(
+                    Ag_Log
+                        $"QA answer trace turn={request.snapshot.turnId} chunks={chunks.Length} inventory={inventory.Length} answer_chars={answer.answer.Length} first_chunk='{firstChunk}'"
+                )
 
                 request.completion.TrySetResult context |> ignore
                 st.bus.PostToAgent(Ag_ContextReady(request.snapshot, chunks, inventory))
@@ -203,32 +230,36 @@ module QaAgent =
         async {
             match msg with
             | Ag_SourcesUpdated(mode, sources, flags) ->
-                match st.session with
-                | Some session -> do! (session :> IAsyncDisposable).DisposeAsync().AsTask() |> Async.AwaitTask
-                | None -> ()
-
                 let flags: SourceFlags =
                     { logExpansions = flags.logExpansions
                       logChunks = flags.logChunks
                       useLexicalFilter = flags.useLexicalFilter
                       elaborateIndexKeywords = flags.elaborateIndexKeywords }
 
-                let session = createSession st flags
+                if st.session.IsSome && sameSourceConfiguration st mode sources flags then
+                    st.bus.PostToAgent(
+                        Ag_Log
+                            $"QA source update skipped; configuration is already active with {sources.Length} source(s)."
+                    )
 
-                let provider = createContextProvider st flags mode sources
+                    return st
+                else
+                    match st.session with
+                    | Some session -> do! (session :> IAsyncDisposable).DisposeAsync().AsTask() |> Async.AwaitTask
+                    | None -> ()
 
-                let! errors = session.ConfigureAsync([ provider ], CancellationToken.None) |> Async.AwaitTask
+                    let session = createSession st flags
+                    let! session = configureSession st flags mode sources session
 
-                for err in errors do
-                    st.bus.PostToAgent(Ag_Log err)
-
-                return
-                    { st with
-                        session = Some session
-                        retrievalMode = mode
-                        sources = sources }
+                    return
+                        { st with
+                            session = Some session
+                            retrievalMode = mode
+                            sources = sources
+                            flags = flags }
             | Ag_MemoryRequested request ->
-                answerRequest st request |> Async.Start
+                let! st, session = ensureSession st
+                answerRequest st session request |> Async.Start
                 return st
             | Ag_FlowDone _ ->
                 match st.session with
@@ -239,13 +270,20 @@ module QaAgent =
             | _ -> return st
         }
 
-    let start apiKey oracleModel bus =
+    let start apiKey oracleModel retrievalMode sources flags bus =
+        let flags: SourceFlags =
+            { logExpansions = flags.logExpansions
+              logChunks = flags.logChunks
+              useLexicalFilter = flags.useLexicalFilter
+              elaborateIndexKeywords = flags.elaborateIndexKeywords }
+
         let st0 =
             { bus = bus
               apiKey = apiKey
               oracleModel = oracleModel
               session = None
-              retrievalMode = FsColbertWithFallback
-              sources = [] }
+              retrievalMode = retrievalMode
+              sources = sources
+              flags = flags }
 
         bus.AgentBus.RunAsync("qa", st0, update) |> FlowUtils.catch bus.PostToFlow
