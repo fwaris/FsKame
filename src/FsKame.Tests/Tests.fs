@@ -44,6 +44,63 @@ type InvalidJsonSchemaChatClient() =
         member this.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
+type SchemaFallbackChatClient(responseText: string, ?rejectJsonMode: bool) =
+    let mutable strictAttempts = 0
+    let mutable jsonModeAttempts = 0
+    let mutable plainAttempts = 0
+
+    member _.StrictAttempts = strictAttempts
+    member _.JsonModeAttempts = jsonModeAttempts
+    member _.PlainAttempts = plainAttempts
+
+    interface IChatClient with
+        member _.Dispose() = ()
+        member _.GetService(serviceType: Type, serviceKey: obj) = null
+
+        member _.GetResponseAsync(chatMessages, options, cancellationToken) =
+            let hasJsonResponseFormat =
+                not (isNull options)
+                && match options.ResponseFormat with
+                   | :? ChatResponseFormatJson -> true
+                   | _ -> false
+
+            let strict =
+                if isNull options || isNull options.AdditionalProperties then
+                    false
+                else
+                    let mutable value = Unchecked.defaultof<obj>
+                    let hasStrict = options.AdditionalProperties.TryGetValue("strict", &value)
+
+                    if hasStrict then
+                        match value with
+                        | :? bool as strict -> strict
+                        | _ -> false
+                    else
+                        false
+
+            if strict then
+                strictAttempts <- strictAttempts + 1
+
+                InvalidOperationException("HTTP 400 invalid_request_error invalid_json_schema: schema type error")
+                |> Task.FromException<ChatResponse>
+            elif defaultArg rejectJsonMode false && hasJsonResponseFormat then
+                jsonModeAttempts <- jsonModeAttempts + 1
+
+                InvalidOperationException(
+                    "HTTP 400 invalid_request_error invalid_json_schema: response_format rejected"
+                )
+                |> Task.FromException<ChatResponse>
+            else
+                if hasJsonResponseFormat then
+                    jsonModeAttempts <- jsonModeAttempts + 1
+                else
+                    plainAttempts <- plainAttempts + 1
+
+                ChatResponse(ChatMessage(ChatRole.Assistant, responseText)) |> Task.FromResult
+
+        member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
+            asyncSeq { yield ChatResponseUpdate() }
+
 type CountingChatClient(responseText: string) =
     let mutable count = 0
 
@@ -520,10 +577,106 @@ let ``keyword schema rejection does not block keyword attachment`` () =
 
         let schemaRejectionLogs =
             logs
-            |> Seq.filter (fun log -> log.Contains("Keyword schema was rejected by OpenAI"))
+            |> Seq.filter (fun log -> log.Contains("OpenAI rejected keyword schema and response-format fallbacks"))
             |> Seq.length
 
         Assert.Equal(1, schemaRejectionLogs)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``keyword schema rejection retries with json mode`` () =
+    async {
+        let source =
+            { kind = Markdown
+              location = $"/tmp/schema-fallback-{Guid.NewGuid():N}.md"
+              enabled = true }
+
+        let passages =
+            [ keywordPassage source 0 "The guide covers emergency dental scheduling."
+              keywordPassage source 1 "The guide excludes cosmetic dental scheduling." ]
+
+        let client =
+            new SchemaFallbackChatClient(
+                """{"items":[{"passageIndex":0,"keywords":["emergency dental scheduling"]},{"passageIndex":1,"keywords":["cosmetic dental exclusion"]}]}"""
+            )
+
+        let logs = ResizeArray<string>()
+        let storageRoot = tempStorageRoot ()
+
+        let! enriched, _ =
+            KnowledgeSources.attachKeywords
+                storageRoot
+                logs.Add
+                (keywordOptions $"test-schema-fallback-{Guid.NewGuid():N}" (client :> IChatClient))
+                source
+                passages
+
+        Assert.Equal<string list>([ "emergency dental scheduling" ], enriched.Head.keywords)
+        Assert.Equal<string list>([ "cosmetic dental exclusion" ], enriched.Tail.Head.keywords)
+        Assert.True(client.StrictAttempts > 0)
+        Assert.True(client.JsonModeAttempts > 0)
+
+        Assert.True(
+            logs
+            |> Seq.exists (fun log -> log.Contains("retrying keyword generation in JSON mode"))
+        )
+
+        let finalSchemaRejectionLogs =
+            logs
+            |> Seq.filter (fun log -> log.Contains("indexing will continue without generated keywords"))
+            |> Seq.length
+
+        Assert.Equal(0, finalSchemaRejectionLogs)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``keyword response format rejection retries with plain json`` () =
+    async {
+        let source =
+            { kind = Markdown
+              location = $"/tmp/format-fallback-{Guid.NewGuid():N}.md"
+              enabled = true }
+
+        let passages =
+            [ keywordPassage source 0 "The guide covers emergency dental scheduling."
+              keywordPassage source 1 "The guide excludes cosmetic dental scheduling." ]
+
+        let client =
+            new SchemaFallbackChatClient(
+                """{"items":[{"passageIndex":0,"keywords":["emergency dental scheduling"]},{"passageIndex":1,"keywords":["cosmetic dental exclusion"]}]}""",
+                rejectJsonMode = true
+            )
+
+        let logs = ResizeArray<string>()
+        let storageRoot = tempStorageRoot ()
+
+        let! enriched, _ =
+            KnowledgeSources.attachKeywords
+                storageRoot
+                logs.Add
+                (keywordOptions $"test-format-fallback-{Guid.NewGuid():N}" (client :> IChatClient))
+                source
+                passages
+
+        Assert.Equal<string list>([ "emergency dental scheduling" ], enriched.Head.keywords)
+        Assert.Equal<string list>([ "cosmetic dental exclusion" ], enriched.Tail.Head.keywords)
+        Assert.True(client.StrictAttempts > 0)
+        Assert.True(client.JsonModeAttempts > 0)
+        Assert.True(client.PlainAttempts > 0)
+
+        Assert.True(
+            logs
+            |> Seq.exists (fun log -> log.Contains("retrying keyword generation without response formatting"))
+        )
+
+        let finalSchemaRejectionLogs =
+            logs
+            |> Seq.filter (fun log -> log.Contains("indexing will continue without generated keywords"))
+            |> Seq.length
+
+        Assert.Equal(0, finalSchemaRejectionLogs)
     }
     |> Async.RunSynchronously
 
@@ -555,7 +708,7 @@ let ``keyword schema rejection keeps cached keyword records`` () =
 
         let schemaRejectionLogs =
             logs
-            |> Seq.filter (fun log -> log.Contains("Keyword schema was rejected by OpenAI"))
+            |> Seq.filter (fun log -> log.Contains("OpenAI rejected keyword schema and response-format fallbacks"))
             |> Seq.length
 
         Assert.Equal(1, schemaRejectionLogs)

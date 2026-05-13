@@ -882,8 +882,6 @@ Query: {query}
         { passageIndex: int
           keywords: string list }
 
-    type private PassageKeywordBatch = { items: PassageKeywordItem list }
-
     type private KeywordBatchGeneration =
         | GeneratedKeywords of PassageKeywordItem list
         | RejectedKeywordSchema of string
@@ -1027,6 +1025,27 @@ Query: {query}
             |> Some
         else
             None
+
+    let private tryReadPassageKeywordItem (root: JsonElement) =
+        match tryReadIntProperty "passageIndex" root, tryReadStringListProperty "keywords" root with
+        | Some passageIndex, Some keywords ->
+            Some
+                { passageIndex = passageIndex
+                  keywords = cleanKeywords 16 keywords }
+        | _ -> None
+
+    let private readKeywordBatch (text: string) =
+        try
+            use document = JsonDocument.Parse text
+            let root = document.RootElement
+            let mutable items = Unchecked.defaultof<JsonElement>
+
+            if root.TryGetProperty("items", &items) && items.ValueKind = JsonValueKind.Array then
+                items.EnumerateArray() |> Seq.choose tryReadPassageKeywordItem |> Seq.toList
+            else
+                []
+        with _ ->
+            []
 
     let private tryReadKeywordCacheRecord (line: string) =
         try
@@ -1186,7 +1205,21 @@ Passages:
 
         strictJsonSchemaResponseFormat schema "passage_keyword_batch" "Keyword metadata for a batch of passages."
 
-    let private generateKeywordBatch
+    let private normalizeKeywordBatch (batch: FsColbert.PassageRef list) responseText =
+        let requested = batch |> List.map _.index |> Set.ofList
+
+        responseText
+        |> readKeywordBatch
+        |> List.filter (fun item -> Set.contains item.passageIndex requested)
+        |> List.map (fun item ->
+            { item with
+                keywords = cleanKeywords 16 item.keywords })
+        |> List.filter (fun item -> not (List.isEmpty item.keywords))
+        |> List.distinctBy _.passageIndex
+
+    let private generateKeywordBatchWith
+        (responseFormat: ChatResponseFormat option)
+        strict
         (client: IChatClient)
         (options: KeywordGenerationOptions)
         (batch: FsColbert.PassageRef list)
@@ -1194,36 +1227,46 @@ Passages:
         async {
             let opts = ChatOptions()
             opts.MaxOutputTokens <- Nullable options.maxOutputTokens
-            opts.ResponseFormat <- keywordResponseFormat ()
-            applyStrictStructuredOutput opts
+
+            responseFormat |> Option.iter (fun format -> opts.ResponseFormat <- format)
+
+            if strict then
+                applyStrictStructuredOutput opts
 
             let reasoning = ReasoningOptions()
             reasoning.Effort <- Nullable ReasoningEffort.Low
             reasoning.Output <- Nullable ReasoningOutput.None
             opts.Reasoning <- reasoning
 
+            let messages = [ ChatMessage(ChatRole.User, keywordPrompt options batch) ]
+
             let! response =
-                client.GetResponseAsync<PassageKeywordBatch>(keywordPrompt options batch, opts)
+                client.GetResponseAsync(messages, opts, CancellationToken.None)
                 |> Async.AwaitTask
 
-            let requested = batch |> List.map _.index |> Set.ofList
-
-            let items = response.Result.items |> Option.ofObj |> Option.defaultValue []
-
-            return
-                items
-                |> List.filter (fun item -> Set.contains item.passageIndex requested)
-                |> List.map (fun item ->
-                    { item with
-                        keywords = cleanKeywords 16 item.keywords })
-                |> List.filter (fun item -> not (List.isEmpty item.keywords))
-                |> List.distinctBy _.passageIndex
+            return normalizeKeywordBatch batch response.Text
         }
 
-    let rec private generateKeywordBatchRecover report client options batch =
+    let private generateKeywordBatch client options batch =
+        generateKeywordBatchWith (Some(keywordResponseFormat ())) true client options batch
+
+    let private generateKeywordBatchJsonMode client options batch =
+        generateKeywordBatchWith (Some ChatResponseFormat.Json) false client options batch
+
+    let private generateKeywordBatchPlainJson client options batch =
+        generateKeywordBatchWith None false client options batch
+
+    let rec private generateKeywordBatchRecoverWith
+        (generateBatch:
+            IChatClient -> KeywordGenerationOptions -> FsColbert.PassageRef list -> Async<PassageKeywordItem list>)
+        report
+        client
+        options
+        (batch: FsColbert.PassageRef list)
+        =
         async {
             try
-                let! generated = generateKeywordBatch client options batch
+                let! generated = generateBatch client options batch
                 let generatedIndexes = generated |> List.map _.passageIndex |> Set.ofList
 
                 let missing =
@@ -1235,7 +1278,8 @@ Passages:
                 else
                     let! recovered =
                         missing
-                        |> List.map (fun passage -> generateKeywordBatchRecover report client options [ passage ])
+                        |> List.map (fun passage ->
+                            generateKeywordBatchRecoverWith generateBatch report client options [ passage ])
                         |> Async.Parallel
 
                     match
@@ -1270,8 +1314,8 @@ Passages:
                     let left, right = batch |> List.splitAt half
 
                     let! recovered =
-                        [ generateKeywordBatchRecover report client options left
-                          generateKeywordBatchRecover report client options right ]
+                        [ generateKeywordBatchRecoverWith generateBatch report client options left
+                          generateKeywordBatchRecoverWith generateBatch report client options right ]
                         |> Async.Parallel
 
                     match
@@ -1290,6 +1334,15 @@ Passages:
                             |> Array.toList
                             |> GeneratedKeywords
         }
+
+    let private generateKeywordBatchRecover report client options batch =
+        generateKeywordBatchRecoverWith generateKeywordBatch report client options batch
+
+    let private generateKeywordBatchJsonModeRecover report client options batch =
+        generateKeywordBatchRecoverWith generateKeywordBatchJsonMode report client options batch
+
+    let private generateKeywordBatchPlainJsonRecover report client options batch =
+        generateKeywordBatchRecoverWith generateKeywordBatchPlainJson report client options batch
 
     let private mapAsyncThrottled degree work items =
         async {
@@ -1395,15 +1448,61 @@ Passages:
                                     (generateKeywordBatchRecover report client options)
                                     batches
 
+                            let rejectedBatches =
+                                List.zip batches generated
+                                |> List.choose (fun (batch, outcome) ->
+                                    match outcome with
+                                    | RejectedKeywordSchema _ -> Some batch
+                                    | GeneratedKeywords _ -> None)
+
+                            let! fallbackGenerated =
+                                if List.isEmpty rejectedBatches then
+                                    async.Return []
+                                else
+                                    async {
+                                        report
+                                            "OpenAI rejected the structured keyword schema; retrying keyword generation in JSON mode."
+
+                                        return!
+                                            mapAsyncThrottled
+                                                options.parallelism
+                                                (generateKeywordBatchJsonModeRecover report client options)
+                                                rejectedBatches
+                                    }
+
+                            let rejectedFallbackBatches =
+                                List.zip rejectedBatches fallbackGenerated
+                                |> List.choose (fun (batch, outcome) ->
+                                    match outcome with
+                                    | RejectedKeywordSchema _ -> Some batch
+                                    | GeneratedKeywords _ -> None)
+
+                            let! plainGenerated =
+                                if List.isEmpty rejectedFallbackBatches then
+                                    async.Return []
+                                else
+                                    async {
+                                        report
+                                            "OpenAI rejected keyword JSON mode; retrying keyword generation without response formatting."
+
+                                        return!
+                                            mapAsyncThrottled
+                                                options.parallelism
+                                                (generateKeywordBatchPlainJsonRecover report client options)
+                                                rejectedFallbackBatches
+                                    }
+
+                            let generated = generated @ fallbackGenerated @ plainGenerated
+
                             let schemaRejected =
-                                generated
+                                plainGenerated
                                 |> List.exists (function
                                     | RejectedKeywordSchema _ -> true
                                     | GeneratedKeywords _ -> false)
 
                             if schemaRejected then
                                 report
-                                    "Keyword schema was rejected by OpenAI; indexing will continue without generated keywords."
+                                    "OpenAI rejected keyword schema and response-format fallbacks; indexing will continue without generated keywords."
 
                             let generatedByIndex =
                                 generated
