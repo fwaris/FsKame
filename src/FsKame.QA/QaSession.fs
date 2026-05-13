@@ -26,9 +26,13 @@ type QaSessionOptions =
       retrievalMode: RetrievalMode
       clients: QaModelClients
       useCaseProfile: QaUseCaseProfile
+      prompts: PromptSet
+      modelRoles: Map<ModelRole, ModelRoleConfig>
       answerModelId: string
       keywordModelId: string
       elaborateIndexKeywords: bool
+      memoryCandidateChunks: int
+      maxContextChunks: int
       memoryService: IMemoryService option
       contextProviders: IQaContextProvider list
       toolProviders: IQaToolProvider list
@@ -49,9 +53,13 @@ module QaSessionOptions =
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
           useCaseProfile = QaUseCaseProfile.generic
+          prompts = PromptSet.empty
+          modelRoles = UseCaseDefinition.defaultModels
           answerModelId = QaDefaults.answerModel
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
+          memoryCandidateChunks = QaDefaults.memoryCandidateChunks
+          maxContextChunks = QaDefaults.maxContextChunks
           memoryService = None
           contextProviders = []
           toolProviders = []
@@ -137,6 +145,20 @@ type QaSession(options: QaSessionOptions) =
                 $"[{index + 1}] {observation.pluginName}.{observation.toolName}\n{Text.truncate 900 observation.content}")
             |> String.concat "\n\n"
 
+    let modelConfig role =
+        options.modelRoles
+        |> Option.ofObj
+        |> Option.bind (Map.tryFind role)
+        |> Option.orElse (UseCaseDefinition.defaultModels |> Map.tryFind role)
+        |> Option.defaultValue (ModelRoleConfig.create options.answerModelId)
+
+    let roleMaxTokens role fallback =
+        (modelConfig role).maxOutputTokens |> Option.defaultValue fallback
+
+    let renderTemplate replacements (template: string) =
+        replacements
+        |> List.fold (fun (text: string) (name, value) -> text.Replace("{{" + name + "}}", value)) template
+
     let isBuiltInContextTool (tool: IQaTool) =
         String.Equals(tool.PluginName, "FsKameTools", StringComparison.OrdinalIgnoreCase)
         && ([ "selected_source_search"
@@ -152,7 +174,7 @@ type QaSession(options: QaSessionOptions) =
         async {
             let request =
                 { query = question
-                  maxResults = clamp QaDefaults.memoryCandidateChunks maxResults }
+                  maxResults = clamp options.memoryCandidateChunks maxResults }
 
             let! results =
                 contextProviders
@@ -216,21 +238,30 @@ type QaSession(options: QaSessionOptions) =
         (chunks: SourceChunk list)
         (observations: QaToolObservation list)
         =
-        let sourceContext = KnowledgeSources.renderContext chunks
+        let sourceContext =
+            KnowledgeSources.renderContextWithLimit options.maxContextChunks chunks
+
         let inventory = KnowledgeSources.renderInventory (contextSources ())
         let typedMemory = renderTypedMemory decision memoryHits
         let toolObservations = renderObservations observations
 
-        [ ChatMessage(
-              ChatRole.System,
-              (options.useCaseProfile.answerSystemInstruction
-               |> Option.defaultValue
-                   "You are FsKame's reusable QA backend. Answer from selected knowledge sources, durable memory, and tool observations when they are relevant. Treat tool observations as authoritative for current facts. Do not invent citations, source details, tool results, or live values. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful.")
-          )
-          ChatMessage(
-              ChatRole.User,
-              $"User question:\n{snapshot.text}\n\nTyped durable memory:\n{typedMemory}\n\nTool observations:\n{toolObservations}\n\nSelected source inventory:\n{inventory}\n\nMatched source context:\n{sourceContext}\n\nReturn only the answer."
-          ) ]
+        let systemPrompt =
+            options.prompts.answerSystem
+            |> Option.orElse options.useCaseProfile.answerSystemInstruction
+            |> Option.defaultValue DefaultUseCasePrompts.answerSystem
+
+        let userPrompt =
+            options.prompts.answerUserTemplate
+            |> Option.defaultValue DefaultUseCasePrompts.answerUserTemplate
+            |> renderTemplate
+                [ "question", snapshot.text
+                  "typedMemory", typedMemory
+                  "toolObservations", toolObservations
+                  "sourceInventory", inventory
+                  "sourceContext", sourceContext ]
+
+        [ ChatMessage(ChatRole.System, systemPrompt)
+          ChatMessage(ChatRole.User, userPrompt) ]
 
     let createSnapshot (request: QaTurnRequest) =
         { turnId = request.turnId
@@ -275,7 +306,7 @@ type QaSession(options: QaSessionOptions) =
                   yield
                       { tool = tool
                         query = question
-                        maxResults = QaDefaults.memoryCandidateChunks
+                        maxResults = options.memoryCandidateChunks
                         arguments = makeArgs [] }
               | None -> ()
 
@@ -295,9 +326,8 @@ type QaSession(options: QaSessionOptions) =
                   yield
                       { tool = tool
                         query = question
-                        maxResults = QaDefaults.memoryCandidateChunks
-                        arguments =
-                          makeArgs [ "query", question; "max_results", string QaDefaults.memoryCandidateChunks ] }
+                        maxResults = options.memoryCandidateChunks
+                        arguments = makeArgs [ "query", question; "max_results", string options.memoryCandidateChunks ] }
               | None -> () ]
 
     let tryJsonString (name: string) (element: JsonElement) =
@@ -322,23 +352,17 @@ type QaSession(options: QaSessionOptions) =
         |> Option.defaultValue fallback
 
     let toolPlanPrompt question (catalog: QaToolCatalog) =
-        [ ChatMessage(
-              ChatRole.System,
-              "You are a conservative tool planner. Return compact JSON only. Select a tool only when it is clearly useful for the user question."
-          )
-          ChatMessage(
-              ChatRole.User,
-              $"""Available tools:
-{renderToolInventory catalog}
+        let systemPrompt =
+            options.prompts.toolPlannerSystem
+            |> Option.defaultValue DefaultUseCasePrompts.toolPlannerSystem
 
-Question:
-{question}
+        let userPrompt =
+            options.prompts.toolPlannerUserTemplate
+            |> Option.defaultValue DefaultUseCasePrompts.toolPlannerUserTemplate
+            |> renderTemplate [ "toolInventory", renderToolInventory catalog; "question", question ]
 
-Return JSON:
-{{"calls":[{{"plugin":"FsKameTools","tool":"source_inventory","query":"...","max_results":3,"arguments":{{"query":"..."}}}}]}}
-
-Use an empty calls array when no tool is needed."""
-          ) ]
+        [ ChatMessage(ChatRole.System, systemPrompt)
+          ChatMessage(ChatRole.User, userPrompt) ]
 
     let parseToolPlan (catalog: QaToolCatalog) (text: string) =
         try
@@ -421,7 +445,7 @@ Use an empty calls array when no tool is needed."""
             | true, true, Some client ->
                 try
                     let opts = ChatOptions()
-                    opts.MaxOutputTokens <- Nullable 500
+                    opts.MaxOutputTokens <- Nullable(roleMaxTokens Planner 500)
 
                     let! response =
                         client.GetResponseAsync(toolPlanPrompt question catalog, opts, cancellationToken)
@@ -530,10 +554,12 @@ Use an empty calls array when no tool is needed."""
             | Some client ->
                 let opts = ChatOptions()
 
-                if ModelCapabilities.supportsTemperature options.answerModelId then
-                    opts.Temperature <- Nullable 0.2f
+                let answerConfig = modelConfig Answer
 
-                opts.MaxOutputTokens <- Nullable 300
+                if ModelCapabilities.supportsTemperature options.answerModelId then
+                    opts.Temperature <- Nullable(answerConfig.temperature |> Option.defaultValue 0.2f)
+
+                opts.MaxOutputTokens <- Nullable(roleMaxTokens Answer 300)
 
                 let! response =
                     client.GetResponseAsync(
@@ -596,6 +622,23 @@ Use an empty calls array when no tool is needed."""
                             None
                     keywordGenerationClient = options.clients.queryExpansion
                     useCaseProfile = options.useCaseProfile
+                    useCaseFingerprint =
+                        { UseCaseDefinition.generic with
+                            id = options.useCaseProfile.id
+                            displayName = options.useCaseProfile.displayName
+                            description = options.useCaseProfile.description
+                            profile = options.useCaseProfile
+                            prompts = options.prompts
+                            models = options.modelRoles
+                            runtime =
+                                { UseCaseRuntimeOptions.defaults with
+                                    retrievalMode = mode
+                                    enableToolPlanner = options.enableToolPlanner
+                                    enableQueryExpansion = options.enableQueryExpansion
+                                    elaborateIndexKeywords = options.elaborateIndexKeywords
+                                    useLexicalFilter = options.useLexicalFilter
+                                    autoWriteback = options.autoWriteback } }
+                        |> UseCaseDefinition.fingerprint
                     keywordModelId = options.keywordModelId
                     elaborateIndexKeywords = options.elaborateIndexKeywords
                     logExpansions = options.logExpansions
@@ -628,7 +671,7 @@ Use an empty calls array when no tool is needed."""
                     let sw = Stopwatch.StartNew()
 
                     let! chunks =
-                        retrieveContext snapshot.text QaDefaults.memoryCandidateChunks cancellationToken
+                        retrieveContext snapshot.text options.memoryCandidateChunks cancellationToken
                         |> Async.StartAsTask
 
                     sw.Stop()

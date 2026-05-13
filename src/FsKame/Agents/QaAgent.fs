@@ -20,7 +20,9 @@ module QaAgent =
     type State =
         { bus: WBus<FlowMsg, AgentMsg>
           apiKey: string
-          oracleModel: string
+          useCase: FsKame.QA.UseCaseDefinition
+          useCasePlugin: FsKame.QA.IUseCasePlugin
+          useCaseSettings: Map<string, string>
           session: FsKame.QA.IQaOrchestrator option
           retrievalMode: FsKame.RetrievalMode
           sources: KnowledgeSource list
@@ -76,27 +78,47 @@ module QaAgent =
 
     let private storageRoot () = FileSystem.AppDataDirectory
 
+    let private modelConfig role (useCase: FsKame.QA.UseCaseDefinition) =
+        FsKame.QA.UseCaseDefinition.model role useCase
+
     let private createSession (st: State) flags : FsKame.QA.IQaOrchestrator =
         let clients: FsKame.QA.QaModelClients =
             if String.IsNullOrWhiteSpace st.apiKey then
                 FsKame.QA.QaModelClients.none
             else
-                let small = createClient st.apiKey C.NANO_MODEL
-                let large = createClient st.apiKey st.oracleModel
+                let queryExpansion =
+                    createClient st.apiKey (modelConfig FsKame.QA.QueryExpansion st.useCase).modelId
 
-                { queryExpansion = Some small
-                  toolPlanner = Some small
-                  answerGenerator = Some large }
+                let planner =
+                    createClient st.apiKey (modelConfig FsKame.QA.Planner st.useCase).modelId
+
+                let answer =
+                    createClient st.apiKey (modelConfig FsKame.QA.Answer st.useCase).modelId
+
+                { queryExpansion = Some queryExpansion
+                  toolPlanner = Some planner
+                  answerGenerator = Some answer }
 
         let storageRoot = storageRoot ()
+        let answerModel = modelConfig FsKame.QA.Answer st.useCase
+        let keywordModel = modelConfig FsKame.QA.Keyword st.useCase
 
         let options =
             { FsKame.QA.QaSessionOptions.create storageRoot with
                 toolProviderDirectory = Some(Path.Combine(storageRoot, "tool-providers"))
                 clients = clients
-                answerModelId = st.oracleModel
-                keywordModelId = C.NANO_MODEL
+                toolProviders = st.useCasePlugin.GetToolProviders()
+                useCaseProfile = st.useCase.profile
+                prompts = st.useCase.prompts
+                modelRoles = st.useCase.models
+                answerModelId = answerModel.modelId
+                keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
+                enableToolPlanner = st.useCase.runtime.enableToolPlanner
+                enableQueryExpansion = st.useCase.runtime.enableQueryExpansion
+                memoryCandidateChunks = st.useCase.runtime.memoryCandidateChunks
+                maxContextChunks = st.useCase.runtime.maxContextChunks
+                autoWriteback = st.useCase.runtime.autoWriteback
                 logTimings = true
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
@@ -109,19 +131,18 @@ module QaAgent =
         let qaMode = toQaMode mode
         let qaSources = sources |> List.map toQaSource
 
-        let keywordGenerationClient =
-            if String.IsNullOrWhiteSpace st.apiKey then
-                None
-            else
-                Some(createClient st.apiKey C.NANO_MODEL)
+        let keywordModel = modelConfig FsKame.QA.Keyword st.useCase
 
         let options =
             { FsKame.QA.FsColbertContextProviderOptions.create (storageRoot ()) qaMode qaSources with
                 queryExpansionClient = None
-                keywordGenerationClient = keywordGenerationClient
-                disposeKeywordGenerationClient = true
-                keywordModelId = C.NANO_MODEL
+                keywordGenerationClient = None
+                disposeKeywordGenerationClient = false
+                useCaseProfile = st.useCase.profile
+                useCaseFingerprint = FsKame.QA.UseCaseDefinition.fingerprint st.useCase
+                keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
+                buildMissingIndexes = false
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
                 useLexicalFilter = flags.useLexicalFilter
@@ -129,10 +150,24 @@ module QaAgent =
 
         new FsKame.QA.FsColbertContextProvider(options) :> FsKame.QA.IQaContextProvider
 
+    let private createPluginContextProviders st =
+        try
+            let hostContext: FsKame.QA.UseCaseHostContext =
+                { storageRoot = storageRoot ()
+                  packageRoot = None
+                  settings = st.useCaseSettings
+                  report = fun msg -> st.bus.PostToAgent(Ag_Log msg) }
+
+            st.useCasePlugin.GetContextProviders hostContext
+        with ex ->
+            st.bus.PostToAgent(Ag_Log $"Use-case context providers failed to load: {ex.Message}")
+            []
+
     let private configureSession st flags mode sources (session: FsKame.QA.IQaOrchestrator) =
         async {
             let provider = createContextProvider st flags mode sources
-            let! errors = session.ConfigureAsync([ provider ], CancellationToken.None) |> Async.AwaitTask
+            let providers = createPluginContextProviders st @ [ provider ]
+            let! errors = session.ConfigureAsync(providers, CancellationToken.None) |> Async.AwaitTask
 
             for err in errors do
                 st.bus.PostToAgent(Ag_Log err)
@@ -270,7 +305,7 @@ module QaAgent =
             | _ -> return st
         }
 
-    let start apiKey oracleModel retrievalMode sources flags bus =
+    let start apiKey useCase useCasePlugin useCaseSettings retrievalMode sources flags bus =
         let flags: SourceFlags =
             { logExpansions = flags.logExpansions
               logChunks = flags.logChunks
@@ -280,7 +315,9 @@ module QaAgent =
         let st0 =
             { bus = bus
               apiKey = apiKey
-              oracleModel = oracleModel
+              useCase = FsKame.QA.UseCaseDefinition.sanitize useCase
+              useCasePlugin = useCasePlugin
+              useCaseSettings = useCaseSettings
               session = None
               retrievalMode = retrievalMode
               sources = sources

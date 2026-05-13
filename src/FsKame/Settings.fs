@@ -224,12 +224,87 @@ module Settings =
 
         Preferences.Default.Set(C.SETTINGS_ORACLE_MODEL, value)
 
+    let private useCaseScopedKey (useCaseId: string) (suffix: string) =
+        let id = useCaseId |> Text.notEmpty |> Option.defaultValue "generic"
+        $"FsKame.UseCases.{id}.{suffix}"
+
+    let private contains (key: string) = Preferences.Default.ContainsKey(key)
+
+    let private getScopedString (useCaseId: string) (suffix: string) (legacyKey: string option) (fallback: string) =
+        let key = useCaseScopedKey useCaseId suffix
+
+        if contains key then
+            Preferences.Default.Get(key, fallback).Trim()
+        else
+            match legacyKey with
+            | Some legacy -> Preferences.Default.Get(legacy, fallback).Trim()
+            | None -> fallback
+
+    let private getScopedBool (useCaseId: string) (suffix: string) (legacyKey: string option) (fallback: bool) =
+        let key = useCaseScopedKey useCaseId suffix
+
+        if contains key then
+            Preferences.Default.Get(key, fallback)
+        else
+            match legacyKey with
+            | Some legacy -> Preferences.Default.Get(legacy, fallback)
+            | None -> fallback
+
+    let modelRoleModelId useCaseId role fallback =
+        let legacy =
+            match role with
+            | FsKame.QA.Answer -> Some C.SETTINGS_ORACLE_MODEL
+            | _ -> None
+
+        let suffix = $"Models.{FsKame.QA.ModelRole.storageName role}.ModelId"
+
+        getScopedString useCaseId suffix legacy fallback
+        |> Text.notEmpty
+        |> Option.defaultValue fallback
+
+    let setModelRoleModelId useCaseId role value =
+        let fallback =
+            match role with
+            | FsKame.QA.Answer -> C.DEFAULT_ORACLE_MODEL
+            | _ -> ""
+
+        let value = value |> Text.notEmpty |> Option.defaultValue fallback
+
+        let key =
+            useCaseScopedKey useCaseId $"Models.{FsKame.QA.ModelRole.storageName role}.ModelId"
+
+        Preferences.Default.Set(key, value)
+
+        if role = FsKame.QA.Answer then
+            setOracleModel value
+
+    let activeUseCaseId () =
+        Preferences.Default.Get(C.SETTINGS_ACTIVE_USE_CASE, "generic").Trim()
+
+    let setActiveUseCaseId (value: string) =
+        let value = value |> Text.notEmpty |> Option.defaultValue "generic"
+        Preferences.Default.Set(C.SETTINGS_ACTIVE_USE_CASE, value)
+
     let retrievalMode () =
         Preferences.Default.Get(C.SETTINGS_RETRIEVAL_MODE, RetrievalModes.toStorageValue FsColbertWithFallback)
         |> RetrievalModes.ofStorageValue
 
     let setRetrievalMode mode =
         Preferences.Default.Set(C.SETTINGS_RETRIEVAL_MODE, RetrievalModes.toStorageValue mode)
+
+    let useCaseRetrievalMode useCaseId fallback =
+        let value =
+            getScopedString
+                useCaseId
+                "Runtime.RetrievalMode"
+                (Some C.SETTINGS_RETRIEVAL_MODE)
+                (RetrievalModes.toStorageValue fallback)
+
+        RetrievalModes.ofStorageValue value
+
+    let setUseCaseRetrievalMode useCaseId mode =
+        Preferences.Default.Set(useCaseScopedKey useCaseId "Runtime.RetrievalMode", RetrievalModes.toStorageValue mode)
+        setRetrievalMode mode
 
     let logExpansions () =
         Preferences.Default.Get(C.SETTINGS_LOG_EXPANSIONS, false)
@@ -249,8 +324,35 @@ module Settings =
     let setUseLexicalFilter value =
         Preferences.Default.Set(C.SETTINGS_USE_LEXICAL_FILTER, value)
 
+    let useCaseUseLexicalFilter useCaseId fallback =
+        getScopedBool useCaseId "Runtime.UseLexicalFilter" (Some C.SETTINGS_USE_LEXICAL_FILTER) fallback
+
+    let setUseCaseUseLexicalFilter useCaseId value =
+        Preferences.Default.Set(useCaseScopedKey useCaseId "Runtime.UseLexicalFilter", value)
+        setUseLexicalFilter value
+
     let elaborateIndexKeywords () =
         Preferences.Default.Get(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, true)
 
     let setElaborateIndexKeywords value =
         Preferences.Default.Set(C.SETTINGS_ELABORATE_INDEX_KEYWORDS, value)
+
+    let useCaseElaborateIndexKeywords useCaseId fallback =
+        getScopedBool useCaseId "Runtime.ElaborateIndexKeywords" (Some C.SETTINGS_ELABORATE_INDEX_KEYWORDS) fallback
+
+    let setUseCaseElaborateIndexKeywords useCaseId value =
+        Preferences.Default.Set(useCaseScopedKey useCaseId "Runtime.ElaborateIndexKeywords", value)
+        setElaborateIndexKeywords value
+
+    let useCaseSetting useCaseId key fallback =
+        getScopedString useCaseId $"Settings.{key}" None fallback
+
+    let setUseCaseSetting useCaseId key value =
+        Preferences.Default.Set(useCaseScopedKey useCaseId $"Settings.{key}", value)
+
+    let useCaseSettings useCaseId (fields: FsKame.QA.UseCaseSettingsField list) =
+        fields
+        |> List.map (fun field ->
+            let fallback = field.defaultValue |> Option.defaultValue ""
+            field.key, useCaseSetting useCaseId field.key fallback)
+        |> Map.ofList

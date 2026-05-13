@@ -581,7 +581,7 @@ Common options:
                             modelId = optionValue "small-model" QaDefaults.nanoModel parsed
                             useCaseProfile = profile }
 
-                    return! KnowledgeSources.loadIndex (storageRoot parsed) report keywordOptions [ source ]
+                    return! KnowledgeSources.loadIndex (storageRoot parsed) report keywordOptions true [ source ]
         }
 
     type ReplayExpansion =

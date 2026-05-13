@@ -10,6 +10,9 @@ module StateMachine =
         { mailbox: Channel<Msg>
           bus: WBus<FlowMsg, AgentMsg>
           apiKey: string
+          useCase: FsKame.QA.UseCaseDefinition
+          useCasePlugin: FsKame.QA.IUseCasePlugin
+          useCaseSettings: Map<string, string>
           oracleModel: string
           retrievalMode: RetrievalMode
           conn: RTOpenAI.Api.Connection
@@ -31,8 +34,17 @@ module StateMachine =
                   useLexicalFilter = ss.useLexicalFilter
                   elaborateIndexKeywords = ss.elaborateIndexKeywords }
 
-            QaAgent.start ss.apiKey ss.oracleModel ss.retrievalMode ss.sources flags ss.bus
-            VoiceAgent.start ss.apiKey ss.conn ss.bus
+            QaAgent.start
+                ss.apiKey
+                ss.useCase
+                ss.useCasePlugin
+                ss.useCaseSettings
+                ss.retrievalMode
+                ss.sources
+                flags
+                ss.bus
+
+            VoiceAgent.start ss.apiKey ss.useCase ss.conn ss.bus
         }
 
     let rec private terminate isAbnormal ss =
@@ -76,6 +88,9 @@ module StateMachine =
     let create
         mailbox
         apiKey
+        useCase
+        useCasePlugin
+        useCaseSettings
         oracleModel
         retrievalMode
         conn
@@ -93,6 +108,9 @@ module StateMachine =
             { mailbox = mailbox
               bus = bus
               apiKey = apiKey
+              useCase = useCase
+              useCasePlugin = useCasePlugin
+              useCaseSettings = useCaseSettings
               oracleModel = oracleModel
               retrievalMode = retrievalMode
               conn = conn

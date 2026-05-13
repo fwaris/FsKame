@@ -249,6 +249,7 @@ type VoiceToolCall =
       content: string
       snapshot: TranscriptSnapshot
       cancellation: CancellationTokenSource
+      timeout: TimeSpan
       task: TaskCompletionSource<ContentFunctionCallOutput> }
 
 type FlowMsg =

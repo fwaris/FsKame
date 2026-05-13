@@ -60,6 +60,31 @@ type CountingChatClient(responseText: string) =
         member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
             asyncSeq { yield ChatResponseUpdate() }
 
+type RecordingChatClient(responseText: string) =
+    let mutable messages: ChatMessage list = []
+    let mutable maxOutputTokens = Nullable<int>()
+    let mutable temperature = Nullable<float32>()
+
+    member _.Messages = messages
+    member _.MaxOutputTokens = maxOutputTokens
+    member _.Temperature = temperature
+
+    interface IChatClient with
+        member _.Dispose() = ()
+        member _.GetService(serviceType: Type, serviceKey: obj) = null
+
+        member _.GetResponseAsync(chatMessages, options, cancellationToken) =
+            messages <- chatMessages |> Seq.toList
+
+            if not (isNull options) then
+                maxOutputTokens <- options.MaxOutputTokens
+                temperature <- options.Temperature
+
+            ChatResponse(ChatMessage(ChatRole.Assistant, responseText)) |> Task.FromResult
+
+        member _.GetStreamingResponseAsync(chatMessages, options, cancellationToken) =
+            asyncSeq { yield ChatResponseUpdate() }
+
 type FakeQaToolHost() =
     interface IQaToolHost with
         member _.Report _ = ()
@@ -141,10 +166,13 @@ let private testKeywordCachePath storageRoot sourceFingerprint (options: Knowled
     Directory.CreateDirectory folder |> ignore
 
     let fileName =
-        [ sourceFingerprint
-          options.modelId
-          options.schemaVersion
-          QaUseCaseProfile.fingerprint options.useCaseProfile ]
+        [ yield sourceFingerprint
+          yield options.modelId
+          yield options.schemaVersion
+          yield QaUseCaseProfile.fingerprint options.useCaseProfile
+
+          if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
+              yield options.useCaseFingerprint ]
         |> String.concat "\n"
         |> hashText
 
@@ -161,12 +189,15 @@ let private seedKeywordCache
     let textHash = hashText passage.text
 
     let key =
-        [ sourceFingerprint
-          string passage.index
-          textHash
-          options.modelId
-          options.schemaVersion
-          QaUseCaseProfile.fingerprint options.useCaseProfile ]
+        [ yield sourceFingerprint
+          yield string passage.index
+          yield textHash
+          yield options.modelId
+          yield options.schemaVersion
+          yield QaUseCaseProfile.fingerprint options.useCaseProfile
+
+          if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
+              yield options.useCaseFingerprint ]
         |> String.concat "\n"
         |> hashText
 
@@ -198,6 +229,66 @@ let ``model capability omits temperature for models that reject it`` modelId =
 [<InlineData("gpt-4.1-mini")>]
 let ``model capability keeps temperature for supported models`` modelId =
     Assert.True(ModelCapabilities.supportsTemperature modelId)
+
+[<Fact>]
+let ``generic use case supplies model roles and runtime defaults`` () =
+    let plugin = new GenericQaUseCasePlugin() :> IUseCasePlugin
+    let definition = plugin.Definition |> UseCaseDefinition.sanitize
+
+    Assert.Equal(UseCaseDefinition.currentContractVersion, plugin.ContractVersion)
+    Assert.Equal("generic", definition.id)
+    Assert.Equal("gpt-realtime-2", (UseCaseDefinition.model Realtime definition).modelId)
+    Assert.Equal("gpt-5.5", (UseCaseDefinition.model Answer definition).modelId)
+    Assert.Equal("gpt-5-nano", (UseCaseDefinition.model Keyword definition).modelId)
+    Assert.True(definition.runtime.enableToolPlanner)
+    Assert.False(definition.runtime.enableQueryExpansion)
+
+[<Fact>]
+let ``qa session applies custom prompts and answer role options`` () =
+    task {
+        let source =
+            { kind = Json
+              location = "memory://fake"
+              enabled = true }
+
+        let recorder = new RecordingChatClient("custom response")
+
+        let answerConfig =
+            { ModelRoleConfig.create "gpt-4.1-mini" with
+                maxOutputTokens = Some 123
+                temperature = Some 0.1f }
+
+        let options =
+            { QaSessionOptions.create (tempStorageRoot ()) with
+                autoWriteback = false
+                contextProviders = [ FakeContextProvider(source) ]
+                clients =
+                    { QaModelClients.none with
+                        answerGenerator = Some recorder }
+                answerModelId = answerConfig.modelId
+                modelRoles = UseCaseDefinition.defaultModels |> Map.add Answer answerConfig
+                prompts =
+                    { PromptSet.empty with
+                        answerSystem = Some "CUSTOM SYSTEM"
+                        answerUserTemplate = Some "Q={{question}}\nCTX={{sourceContext}}\nINV={{sourceInventory}}" } }
+
+        use session = new QaSession(options)
+
+        let request =
+            { turnId = Guid.NewGuid().ToString("N")
+              question = "What does the fake context say?"
+              realtimeJudgement = None
+              deadline = None }
+
+        let! answer = session.AnswerAsync(request, CancellationToken.None)
+
+        Assert.Equal("custom response", answer.answer)
+        Assert.Equal(123, recorder.MaxOutputTokens.Value)
+        Assert.Equal(0.1f, recorder.Temperature.Value)
+        Assert.Equal("CUSTOM SYSTEM", recorder.Messages[0].Text)
+        Assert.Contains("Q=What does the fake context say?", recorder.Messages[1].Text)
+        Assert.Contains("Fake context for What does the fake context say?", recorder.Messages[1].Text)
+    }
 
 [<Fact>]
 let ``getSynonyms parses comma-separated keywords correctly`` () =

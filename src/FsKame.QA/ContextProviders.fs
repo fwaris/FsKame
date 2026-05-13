@@ -14,8 +14,10 @@ type FsColbertContextProviderOptions =
       disposeQueryExpansionClient: bool
       disposeKeywordGenerationClient: bool
       useCaseProfile: QaUseCaseProfile
+      useCaseFingerprint: string
       keywordModelId: string
       elaborateIndexKeywords: bool
+      buildMissingIndexes: bool
       logExpansions: bool
       logChunks: bool
       useLexicalFilter: bool
@@ -31,8 +33,10 @@ module FsColbertContextProviderOptions =
           disposeQueryExpansionClient = false
           disposeKeywordGenerationClient = false
           useCaseProfile = QaUseCaseProfile.generic
+          useCaseFingerprint = ""
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
+          buildMissingIndexes = true
           logExpansions = false
           logChunks = false
           useLexicalFilter = true
@@ -66,9 +70,15 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
                                 enabled = options.elaborateIndexKeywords
                                 client = options.keywordGenerationClient
                                 modelId = options.keywordModelId
-                                useCaseProfile = options.useCaseProfile }
+                                useCaseProfile = options.useCaseProfile
+                                useCaseFingerprint = options.useCaseFingerprint }
 
-                        KnowledgeSources.loadIndex options.storageRoot options.report keywordOptions sources
+                        KnowledgeSources.loadIndex
+                            options.storageRoot
+                            options.report
+                            keywordOptions
+                            options.buildMissingIndexes
+                            sources
 
                 let! loaded, errors = Async.StartAsTask(loadWork, cancellationToken = cancellationToken)
 

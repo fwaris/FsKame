@@ -1,5 +1,6 @@
 namespace FsKame.Views
 
+open System
 open Fabulous.Maui
 open FsKame
 open Microsoft.Maui
@@ -20,19 +21,43 @@ module SettingsView =
         else
             RetrievalModeChanged InternalDocumentIndex
 
+    let private roleLabel role =
+        $"{FsKame.QA.ModelRole.storageName role} model"
+
+    let private roleValue model role =
+        model.modelRoleOverrides
+        |> Map.tryFind role
+        |> Option.defaultValue (FsKame.QA.UseCaseDefinition.model role model.activeUseCase).modelId
+
+    let private facetValue model (field: FsKame.QA.UseCaseSettingsField) =
+        model.useCaseSettings
+        |> Map.tryFind field.key
+        |> Option.orElse field.defaultValue
+        |> Option.defaultValue ""
+
+    let private parseBool (value: string) =
+        match Boolean.TryParse(value) with
+        | true, parsed -> parsed
+        | false, _ -> false
+
+    let private isBoolFacet (field: FsKame.QA.UseCaseSettingsField) =
+        match (defaultArg (Option.ofObj field.kind) "").Trim().ToLowerInvariant() with
+        | "bool"
+        | "boolean"
+        | "toggle"
+        | "switch" -> true
+        | _ -> false
+
     let private settingsForm model =
         let canEditSettings = canEditSettings model
+        let roles = FsKame.QA.ModelRole.all
+        let baseRows = 7 + roles.Length
+        let facetRows = model.activeUseCase.settingsFacets.Length
 
-        Grid(
-            [ Dimension.Absolute 112.; Dimension.Star; Dimension.Absolute 48. ],
-            [ Dimension.Absolute 48.
-              Dimension.Absolute 48.
-              Dimension.Absolute 48.
-              Dimension.Absolute 48.
-              Dimension.Absolute 48.
-              Dimension.Absolute 48.
-              Dimension.Absolute 48. ]
-        ) {
+        let rowDefinitions =
+            List.init (baseRows + facetRows) (fun _ -> Dimension.Absolute 48.)
+
+        Grid([ Dimension.Absolute 112.; Dimension.Star; Dimension.Absolute 48. ], rowDefinitions) {
             ViewControls.formLabel "OpenAI key" 0
 
             Entry(model.openAiKey, OpenAiKeyChanged)
@@ -53,17 +78,32 @@ module SettingsView =
                 .gridRow(0)
                 .gridColumn (2)
 
-            ViewControls.formLabel "Oracle model" 1
+            ViewControls.formLabel "Use Case" 1
 
-            Entry(model.oracleModel, OracleModelChanged)
-                .placeholder("Oracle model")
-                .isEnabled(canEditSettings)
+            Label($"{model.activeUseCase.displayName} ({model.activeUseCase.id})")
+                .font(size = 13.)
+                .centerVertical()
                 .gridRow(1)
                 .gridColumn(1)
                 .gridColumnSpan(2)
                 .margin (2.)
 
-            ViewControls.formLabel "Retrieval" 2
+            for row, role in roles |> List.indexed do
+                let row = row + 2
+
+                ViewControls.formLabel (roleLabel role) row
+
+                Entry(roleValue model role, fun value -> ModelRoleModelChanged(role, value))
+                    .placeholder(roleLabel role)
+                    .isEnabled(canEditSettings)
+                    .gridRow(row)
+                    .gridColumn(1)
+                    .gridColumnSpan(2)
+                    .margin (2.)
+
+            let runtimeRow = 2 + roles.Length
+
+            ViewControls.formLabel "Retrieval" runtimeRow
 
             (HStack(spacing = 8.) {
                 Switch(model.retrievalMode = FsColbertWithFallback, retrievalModeToggled)
@@ -72,42 +112,65 @@ module SettingsView =
 
                 Label(RetrievalModes.displayName model.retrievalMode).font(size = 13.).centerVertical ()
             })
-                .gridRow(2)
+                .gridRow(runtimeRow)
                 .gridColumn(1)
                 .gridColumnSpan(2)
                 .margin (2.)
 
-            ViewControls.formLabel "Log Expansions" 3
+            ViewControls.formLabel "Log Expansions" (runtimeRow + 1)
 
             Switch(model.logExpansions, LogExpansionsToggled)
                 .isEnabled(canEditSettings)
-                .gridRow(3)
+                .gridRow(runtimeRow + 1)
                 .gridColumn(1)
                 .centerVertical ()
 
-            ViewControls.formLabel "Log Chunks" 4
+            ViewControls.formLabel "Log Chunks" (runtimeRow + 2)
 
             Switch(model.logChunks, LogChunksToggled)
                 .isEnabled(canEditSettings)
-                .gridRow(4)
+                .gridRow(runtimeRow + 2)
                 .gridColumn(1)
                 .centerVertical ()
 
-            ViewControls.formLabel "Lexical Filter" 5
+            ViewControls.formLabel "Lexical Filter" (runtimeRow + 3)
 
             Switch(model.useLexicalFilter, UseLexicalFilterToggled)
                 .isEnabled(canEditSettings)
-                .gridRow(5)
+                .gridRow(runtimeRow + 3)
                 .gridColumn(1)
                 .centerVertical ()
 
-            ViewControls.formLabel "Index Keywords" 6
+            ViewControls.formLabel "Index Keywords" (runtimeRow + 4)
 
             Switch(model.elaborateIndexKeywords, ElaborateIndexKeywordsToggled)
                 .isEnabled(canEditSettings)
-                .gridRow(6)
+                .gridRow(runtimeRow + 4)
                 .gridColumn(1)
                 .centerVertical ()
+
+            for row, field in model.activeUseCase.settingsFacets |> List.indexed do
+                let row = runtimeRow + 5 + row
+
+                ViewControls.formLabel field.label row
+
+                if isBoolFacet field then
+                    Switch(
+                        parseBool (facetValue model field),
+                        fun value -> UseCaseSettingChanged(field.key, string value)
+                    )
+                        .isEnabled(canEditSettings)
+                        .gridRow(row)
+                        .gridColumn(1)
+                        .centerVertical ()
+                else
+                    Entry(facetValue model field, fun value -> UseCaseSettingChanged(field.key, value))
+                        .placeholder(field.label)
+                        .isEnabled(canEditSettings)
+                        .gridRow(row)
+                        .gridColumn(1)
+                        .gridColumnSpan(2)
+                        .margin (2.)
         }
 
     let contentPage (model: Model) =
