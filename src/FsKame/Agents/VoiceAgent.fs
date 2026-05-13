@@ -1,6 +1,7 @@
 namespace FsKame.WorkFlow
 
 open System
+open System.Text.RegularExpressions
 open System.Text.Json
 open System.Text.Json.Serialization
 open System.Threading
@@ -28,13 +29,24 @@ module VoiceAgent =
         | NoActiveResponse
         | ActiveResponse of {| id: string option |}
 
+    type private VoiceUseCaseConfig =
+        { realtimeModel: string
+          transcriberModel: string
+          transcriberPrompt: string
+          instructions: string
+          speechResultInstructions: string
+          memoryRequestTimeout: TimeSpan
+          functionCallTimeout: TimeSpan }
+
     type private VoiceState =
         { initialized: bool
+          config: VoiceUseCaseConfig
           realtimeSession: Session
           transcriptByItem: Map<string, string>
           revision: int
           pendingToolCalls: Map<string, VoiceToolCall>
           completedToolTurns: Set<string>
+          pendingSpeakByCallId: Map<string, string>
           userSpeechState: UserSpeechState
           responseCreatedState: ResponseCreatedState
           assistantSpeechStarted: bool
@@ -45,12 +57,27 @@ module VoiceAgent =
     let private TOOL_CALL_PRIORITY = 0
     let private CONTROL_EVENT_PRIORITY = 10
     let private SPEAK_PRIORITY = 20
-    let private FUNCTION_CALL_TIMEOUT = TimeSpan.FromSeconds 45.
 
-    let private MEMORY_REQUEST_TIMEOUT =
-        TimeSpan.FromMilliseconds(float FsKame.C.REALTIME_MEMORY_TIMEOUT_MS)
+    let private useCaseConfig (useCase: FsKame.QA.UseCaseDefinition) =
+        let useCase = FsKame.QA.UseCaseDefinition.sanitize useCase
+        let realtime = FsKame.QA.UseCaseDefinition.model FsKame.QA.Realtime useCase
+        let transcriber = FsKame.QA.UseCaseDefinition.model FsKame.QA.Transcriber useCase
 
-    let sessionAudio =
+        { realtimeModel = realtime.modelId
+          transcriberModel = transcriber.modelId
+          transcriberPrompt =
+            useCase.prompts.transcriberPrompt
+            |> Option.defaultValue FsKame.QA.DefaultUseCasePrompts.transcriberPrompt
+          instructions =
+            useCase.prompts.realtimeInstructions
+            |> Option.defaultValue FsKame.QA.DefaultUseCasePrompts.realtimeInstructions
+          speechResultInstructions =
+            useCase.prompts.speechResultInstruction
+            |> Option.defaultValue FsKame.QA.DefaultUseCasePrompts.speechResultInstruction
+          memoryRequestTimeout = TimeSpan.FromMilliseconds(float useCase.runtime.realtimeMemoryTimeoutMs)
+          functionCallTimeout = TimeSpan.FromMilliseconds(float useCase.runtime.functionCallTimeoutMs) }
+
+    let private sessionAudio config =
         { Audio.Default with
             input =
                 Include(
@@ -58,10 +85,8 @@ module VoiceAgent =
                         { AudioInput.Default with
                             transcription =
                                 { language = "en"
-                                  model = "gpt-4o-mini-transcribe"
-                                  prompt =
-                                    Some
-                                        "Expect natural spoken question-answering conversation. Requests may involve a wide variety of questions" }
+                                  model = config.transcriberModel
+                                  prompt = Some config.transcriberPrompt }
                                 |> Some
                                 |> Include
                             turn_detection =
@@ -84,18 +109,18 @@ Allowed direct actions:
 - handle short rapport, repetition, or simple clarification
 - ask a brief follow-up when the request is too vague to answer safely
 - answer simple conversational turns directly
-- say a short preamble before a tool call, such as "Let me check that."
 
 Tool use:
 - For every question (even simple ones about time, weather, etc.), request, summary, comparison, current-info question, or follow-up - which can't be answered trivially from existing context - call QUERY_ORACLE.
 - Pass the user's request as the `question` argument.
 - When you call QUERY_ORACLE, you may pass compact advisory hints only when they are clear from the user's words and recent conversation: turn_kind, topic_continuity, memory_action, needs_external_context, sensitive, and confidence. These are hints only; the backend validates them and decides memory/tool/oracle handling.
+- Call QUERY_ORACLE silently. Do not say filler or status phrases before the call, such as "let me check", "one moment", "I'll look that up", or similar.
 - Do not refuse a request just because it is not about documents or selected sources.
 - Do not invent tool results, source details, page contents, citations, live values, or app state.
 
 After QUERY_ORACLE returns:
 - Treat the tool result as the authoritative answer.
-- Speak the tool result naturally and briefly, without adding new facts.
+- Speak the tool result naturally and briefly, without adding new facts or a status preface.
 - If the tool says there is not enough information, say that plainly."""
 
     let private oracleTool =
@@ -146,13 +171,13 @@ After QUERY_ORACLE returns:
                         |> Map.ofList
                     required = [ "question" ] } }
 
-    let private updateSession (session: Session) =
+    let private updateSession config (session: Session) =
         { session with
             id = Skip
             ``object`` = Skip
-            model = Some FsKame.C.DEFAULT_REALTIME_MODEL
-            audio = Include(Some sessionAudio)
-            instructions = Some instructions
+            model = Some config.realtimeModel
+            audio = Include(Some(sessionAudio config))
+            instructions = Some config.instructions
             tool_choice = Include(Some "auto")
             tools = Include(Some [ oracleTool ])
             expires_at = Skip }
@@ -164,10 +189,10 @@ After QUERY_ORACLE returns:
 
     let private sendClientEvent conn event = Connection.sendClientEvent conn event
 
-    let private sessionUpdateEvent (session: Session) =
+    let private sessionUpdateEvent config (session: Session) =
         { SessionUpdate.Default with
             event_id = Utils.newId ()
-            session = updateSession session }
+            session = updateSession config session }
         |> ClientEvent.SessionUpdate
 
     let private oracleAnswerInput answer =
@@ -175,7 +200,7 @@ After QUERY_ORACLE returns:
             role = "user"
             content =
                 [ MessageContent.Input_text
-                      {| text = $"Oracle answer to speak exactly, without adding facts:\n\n{answer}" |} ] }
+                      {| text = $"Speak this oracle answer exactly, without adding facts:\n\n{answer}" |} ] }
         |> ConversationItem.Message
 
     let private responseCreateEvent (responseInstructions: string) (input: ConversationItem list option) =
@@ -193,6 +218,9 @@ After QUERY_ORACLE returns:
             response = Include(Some response) }
         |> ClientEvent.ResponseCreate
 
+    let private responseInstructionsForOracleAnswer baseInstructions answer =
+        $"{baseInstructions}\n\nOracle answer to speak exactly, without adding facts:\n\n{answer}"
+
     let private responseCancelEvent () =
         { ResponseCancel.Default with
             event_id = Utils.newId () }
@@ -207,8 +235,26 @@ After QUERY_ORACLE returns:
     let private fallbackToolOutput (snapshot: TranscriptSnapshot) =
         $"I cannot answer that from the available tools and context right now. The user asked: {snapshot.text}"
 
+    let private speechFriendlyMarkdown (text: string) =
+        let replace (pattern: string) (replacement: string) (value: string) =
+            Regex.Replace(value, pattern, replacement)
+
+        text
+        |> replace @"(?m)^\s{0,3}#{1,6}\s*" ""
+        |> replace @"(?m)^\s{0,3}>\s?" ""
+        |> replace @"(?m)^\s*[-*+]\s+" ""
+        |> replace @"(?m)^\s*\d+[.)]\s+" ""
+        |> replace @"(?m)^\s*(-{3,}|\*{3,}|_{3,})\s*$" ""
+        |> replace @"!\[([^\]]*)\]\([^)]+\)" "$1"
+        |> replace @"\[([^\]]+)\]\([^)]+\)" "$1"
+        |> replace @"`([^`]+)`" "$1"
+        |> replace @"(\*\*|__)(.*?)\1" "$2"
+        |> replace @"(\*|_)(.*?)\1" "$2"
+        |> replace @"(?<!\S)#{1,6}(?!\S)" ""
+        |> FsKame.Text.normalizeWhitespace
+
     let private oracleToolOutput (_snapshot: TranscriptSnapshot) (candidate: OracleCandidate) =
-        candidate.answer |> FsKame.Text.normalizeWhitespace
+        candidate.answer |> speechFriendlyMarkdown
 
     let private makeTranscriptSnapshot st itemId text isFinal =
         let revision = st.revision + 1
@@ -221,11 +267,11 @@ After QUERY_ORACLE returns:
           isFinal = isFinal
           receivedAt = DateTimeOffset.UtcNow }
 
-    let private createMemoryRequest snapshot realtimeJudgement cancellationToken =
+    let private createMemoryRequest config snapshot realtimeJudgement cancellationToken =
         { requestId = Utils.newId ()
           snapshot = snapshot
           realtimeJudgement = realtimeJudgement
-          deadline = DateTimeOffset.UtcNow + MEMORY_REQUEST_TIMEOUT
+          deadline = DateTimeOffset.UtcNow + config.memoryRequestTimeout
           cancellationToken = cancellationToken
           completion = TaskCompletionSource<MemoryContext>(TaskCreationOptions.RunContinuationsAsynchronously) }
 
@@ -234,13 +280,12 @@ After QUERY_ORACLE returns:
         | ActiveResponse _ -> true
         | NoActiveResponse -> false
 
-    let private speakToolResultInstructions =
-        "Speak the provided oracle answer naturally and briefly. Do not add facts, omit caveats, or reinterpret it. If the answer contains a refusal or uncertainty, preserve that."
-
     let private tryScheduleSpeak (st: VoiceState) =
         match st.userSpeechState, st.responseCreatedState, st.pendingSpeakTexts with
         | Silent, NoActiveResponse, text :: remaining ->
-            responseCreateEvent speakToolResultInstructions (Some [ oracleAnswerInput text ])
+            responseCreateEvent
+                (responseInstructionsForOracleAnswer st.config.speechResultInstructions text)
+                (Some [ oracleAnswerInput text ])
             |> SendClientEvent
             |> enqueueOutbound st.outputQueue SPEAK_PRIORITY
 
@@ -427,7 +472,7 @@ After QUERY_ORACLE returns:
         | ToolNames.QUERY_ORACLE ->
             let revision, snapshot = makeTranscriptSnapshot st fc.call_id question true
             let cancellation = new CancellationTokenSource()
-            cancellation.CancelAfter FUNCTION_CALL_TIMEOUT
+            cancellation.CancelAfter st.config.functionCallTimeout
 
             let call =
                 { name = fc.name
@@ -435,11 +480,12 @@ After QUERY_ORACLE returns:
                   content = fc.arguments
                   snapshot = snapshot
                   cancellation = cancellation
+                  timeout = st.config.functionCallTimeout
                   task =
                     TaskCompletionSource<ContentFunctionCallOutput>(TaskCreationOptions.RunContinuationsAsynchronously) }
 
             let memoryRequest =
-                createMemoryRequest snapshot realtimeJudgement cancellation.Token
+                createMemoryRequest st.config snapshot realtimeJudgement cancellation.Token
 
             enqueueOutbound st.outputQueue TOOL_CALL_PRIORITY (AwaitToolCall call)
 
@@ -510,17 +556,36 @@ After QUERY_ORACLE returns:
         if String.IsNullOrWhiteSpace output then
             st
         else
-            st.bus.PostToAgent(Ag_Log $"Oracle tool output ready for call {callId}; output_chars={output.Length}.")
+            st.bus.PostToAgent(
+                Ag_Log
+                    $"Oracle tool output ready for call {callId}; output_chars={output.Length}; waiting for realtime item acknowledgement."
+            )
 
             { st with
-                pendingSpeakTexts = st.pendingSpeakTexts @ [ output ] }
-            |> tryScheduleSpeak
+                pendingSpeakByCallId = st.pendingSpeakByCallId |> Map.add callId output }
+
+    let private acknowledgeFunctionOutput (st: VoiceState) (eventName: string) (item: ConversationItem) =
+        match item with
+        | Function_call_output output ->
+            match st.pendingSpeakByCallId |> Map.tryFind output.call_id with
+            | None -> st
+            | Some text ->
+                st.bus.PostToAgent(
+                    Ag_Log
+                        $"Realtime acknowledged oracle tool output for call {output.call_id} via {eventName}; scheduling speech."
+                )
+
+                { st with
+                    pendingSpeakByCallId = st.pendingSpeakByCallId |> Map.remove output.call_id
+                    pendingSpeakTexts = st.pendingSpeakTexts @ [ text ] }
+                |> tryScheduleSpeak
+        | _ -> st
 
     let private runAwaitedToolCall (bus: WBus<FlowMsg, AgentMsg>) conn (toolCall: VoiceToolCall) =
         async {
             try
                 let! result =
-                    toolCall.task.Task.WaitAsync(FUNCTION_CALL_TIMEOUT, toolCall.cancellation.Token)
+                    toolCall.task.Task.WaitAsync(toolCall.timeout, toolCall.cancellation.Token)
                     |> Async.AwaitTask
 
                 createFunctionOutputEvent result |> sendClientEvent conn
@@ -538,7 +603,7 @@ After QUERY_ORACLE returns:
         async {
             match ev with
             | ServerEvent.SessionCreated s when not st.initialized ->
-                sessionUpdateEvent s.session |> enqueueClientEvent st
+                sessionUpdateEvent st.config s.session |> enqueueClientEvent st
                 st.bus.PostToAgent(Ag_Log "Realtime session created.")
 
                 return
@@ -548,6 +613,10 @@ After QUERY_ORACLE returns:
             | ServerEvent.SessionUpdated ev ->
                 st.bus.PostToAgent(Ag_Log "Realtime session updated.")
                 return { st with realtimeSession = ev.session }
+            | ServerEvent.ConversationItemAdded ev ->
+                return acknowledgeFunctionOutput st "conversation.item.added" ev.item
+            | ServerEvent.ConversationItemDone ev ->
+                return acknowledgeFunctionOutput st "conversation.item.done" ev.item
             | ServerEvent.ResponseCreated ev ->
                 let responseId =
                     match ev.response.id with
@@ -624,11 +693,11 @@ After QUERY_ORACLE returns:
             | _ -> return st
         }
 
-    let private startRealtime apiKey conn (bus: WBus<FlowMsg, AgentMsg>) =
+    let private startRealtime config apiKey conn (bus: WBus<FlowMsg, AgentMsg>) =
         async {
             let keyReq =
                 { KeyReq.Default with
-                    session = updateSession KeyReq.Default.session }
+                    session = updateSession config KeyReq.Default.session }
 
             let! ephemKey = Connection.getEphemeralKey apiKey keyReq |> Async.AwaitTask
             do! Connection.connect ephemKey conn |> Async.AwaitTask
@@ -652,14 +721,16 @@ After QUERY_ORACLE returns:
                 | AwaitToolCall toolCall -> runAwaitedToolCall bus conn toolCall |> Async.Start
             })
 
-    let private startAgent outputQueue (bus: WBus<FlowMsg, AgentMsg>) =
+    let private startAgent config outputQueue (bus: WBus<FlowMsg, AgentMsg>) =
         let st =
             { initialized = false
+              config = config
               realtimeSession = Session.Default
               transcriptByItem = Map.empty
               revision = 0
               pendingToolCalls = Map.empty
               completedToolTurns = Set.empty
+              pendingSpeakByCallId = Map.empty
               userSpeechState = Silent
               responseCreatedState = NoActiveResponse
               assistantSpeechStarted = false
@@ -669,15 +740,16 @@ After QUERY_ORACLE returns:
 
         bus.AgentBus.RunAsync("voice", st, update)
 
-    let start apiKey conn bus =
+    let start apiKey useCase conn bus =
         let outputQueue = AsyncPriorityQueue<Q>()
+        let config = useCaseConfig useCase
 
         async {
             let! outputPump = Async.StartChild(startOutputPump conn bus outputQueue)
-            let! voiceAgent = Async.StartChild(startAgent outputQueue bus)
+            let! voiceAgent = Async.StartChild(startAgent config outputQueue bus)
 
             try
-                do! startRealtime apiKey conn bus
+                do! startRealtime config apiKey conn bus
             finally
                 outputQueue.Complete()
 

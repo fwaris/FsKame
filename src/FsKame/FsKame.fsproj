@@ -68,6 +68,7 @@
     <Compile Include="KnowledgeSources.fs" />
     <Compile Include="DurableMemory.fs" />
     <Compile Include="Tooling.fs" />
+    <Compile Include="UseCases.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="PdfLibrary.fs" />
     <Compile Include="Agents\SourceAgent.fs" />

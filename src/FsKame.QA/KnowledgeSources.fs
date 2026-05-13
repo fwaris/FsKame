@@ -44,7 +44,8 @@ module KnowledgeSources =
           batchSize: int
           parallelism: int
           maxOutputTokens: int
-          useCaseProfile: QaUseCaseProfile }
+          useCaseProfile: QaUseCaseProfile
+          useCaseFingerprint: string }
 
     module KeywordGenerationOptions =
         let defaults =
@@ -55,7 +56,8 @@ module KnowledgeSources =
               batchSize = 4
               parallelism = 2
               maxOutputTokens = 25000
-              useCaseProfile = QaUseCaseProfile.generic }
+              useCaseProfile = QaUseCaseProfile.generic
+              useCaseFingerprint = "" }
 
         let disabled = { defaults with enabled = false }
 
@@ -903,10 +905,13 @@ Query: {query}
 
     let private keywordCachePath storageRoot sourceFingerprint (options: KeywordGenerationOptions) =
         let fileName =
-            [ sourceFingerprint
-              options.modelId
-              options.schemaVersion
-              QaUseCaseProfile.fingerprint options.useCaseProfile ]
+            [ yield sourceFingerprint
+              yield options.modelId
+              yield options.schemaVersion
+              yield QaUseCaseProfile.fingerprint options.useCaseProfile
+
+              if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
+                  yield options.useCaseFingerprint ]
             |> String.concat "\n"
             |> hashText
 
@@ -925,15 +930,19 @@ Query: {query}
                 options.schemaVersion
                 |> Text.notEmpty
                 |> Option.defaultValue KeywordGenerationOptions.defaults.schemaVersion
-            useCaseProfile = QaUseCaseProfile.sanitize options.useCaseProfile }
+            useCaseProfile = QaUseCaseProfile.sanitize options.useCaseProfile
+            useCaseFingerprint = options.useCaseFingerprint |> Text.notEmpty |> Option.defaultValue "" }
 
     let private keywordCacheKey sourceFingerprint (options: KeywordGenerationOptions) passageIndex textHash =
-        [ sourceFingerprint
-          string passageIndex
-          textHash
-          options.modelId
-          options.schemaVersion
-          QaUseCaseProfile.fingerprint options.useCaseProfile ]
+        [ yield sourceFingerprint
+          yield string passageIndex
+          yield textHash
+          yield options.modelId
+          yield options.schemaVersion
+          yield QaUseCaseProfile.fingerprint options.useCaseProfile
+
+          if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
+              yield options.useCaseFingerprint ]
         |> String.concat "\n"
         |> hashText
 
@@ -1309,14 +1318,16 @@ Passages:
                    keywordsHash = passage.keywords |> String.concat "\n" |> hashText |})
             |> fun items -> JsonSerializer.Serialize items
 
-        [ $"keywords=enabled"
-          $"keywordModel={options.modelId}"
-          $"keywordSchema={options.schemaVersion}"
-          $"useCaseProfile={options.useCaseProfile.id}"
-          $"useCaseProfileHash={QaUseCaseProfile.fingerprint options.useCaseProfile}"
-          $"keywordMetadataHash={hashText metadata}"
-          $"tfidfTextWeight={FsColbert.TfidfOptions.defaults.textWeight}"
-          $"tfidfKeywordWeight={FsColbert.TfidfOptions.defaults.keywordWeight}" ]
+        [ yield "keywords=enabled"
+          yield $"keywordModel={options.modelId}"
+          yield $"keywordSchema={options.schemaVersion}"
+          yield $"useCaseProfile={options.useCaseProfile.id}"
+          yield $"useCaseProfileHash={QaUseCaseProfile.fingerprint options.useCaseProfile}"
+          if not (String.IsNullOrWhiteSpace options.useCaseFingerprint) then
+              yield $"useCaseDefinitionHash={options.useCaseFingerprint}"
+          yield $"keywordMetadataHash={hashText metadata}"
+          yield $"tfidfTextWeight={FsColbert.TfidfOptions.defaults.textWeight}"
+          yield $"tfidfKeywordWeight={FsColbert.TfidfOptions.defaults.keywordWeight}" ]
         |> String.concat "\n"
 
     let private disabledKeywordFingerprint =
@@ -1497,6 +1508,54 @@ Passages:
 
         { index with passages = passages }
 
+    type private PersistedIndexCandidate =
+        { path: string
+          index: FsColbert.ColbertIndex
+          keywordCount: int
+          isExactFingerprint: bool
+          modifiedTicks: int64 }
+
+    let private indexKeywordCount (index: FsColbert.ColbertIndex) =
+        index.passages
+        |> List.sumBy (fun passage ->
+            passage.reference.keywords
+            |> Option.ofObj
+            |> Option.map List.length
+            |> Option.defaultValue 0)
+
+    let private indexMatchesSource (source: KnowledgeSource) (index: FsColbert.ColbertIndex) =
+        index.passages
+        |> List.exists (fun passage ->
+            String.Equals(passage.reference.sourceLocation, source.location, StringComparison.OrdinalIgnoreCase)
+            || String.Equals(passage.reference.sourceId, source.location, StringComparison.OrdinalIgnoreCase))
+
+    let private tryLoadBestPersistedIndex storageRoot source exactPath =
+        try
+            Directory.EnumerateFiles(indexFolder storageRoot, "*.fsci")
+            |> Seq.choose (fun path ->
+                match tryLoadPersistedIndex path with
+                | Ok(Some index) when indexMatchesSource source index ->
+                    let index = bindIndexToSource source index
+
+                    Some
+                        { path = path
+                          index = index
+                          keywordCount = indexKeywordCount index
+                          isExactFingerprint = String.Equals(path, exactPath, StringComparison.OrdinalIgnoreCase)
+                          modifiedTicks =
+                            try
+                                File.GetLastWriteTimeUtc(path).Ticks
+                            with _ ->
+                                0L }
+                | Ok _ -> None
+                | Error _ -> None)
+            |> Seq.sortByDescending (fun candidate ->
+                candidate.keywordCount, candidate.isExactFingerprint, candidate.modifiedTicks)
+            |> Seq.tryHead
+            |> Ok
+        with ex ->
+            Error ex.Message
+
     let private tryLoadPrebuiltIndex storageRoot (source: KnowledgeSource) =
         tryLoadPrebuiltManifest storageRoot
         |> List.tryFind (fun item ->
@@ -1591,6 +1650,7 @@ Passages:
         storageRoot
         report
         (keywordOptions: KeywordGenerationOptions)
+        buildMissingIndexes
         (sources: KnowledgeSource list)
         : Async<RetrievalIndex * string list> =
         async {
@@ -1620,14 +1680,29 @@ Passages:
 
                             let path = sourceIndexPath storageRoot source keywordFingerprint
 
-                            match tryLoadPersistedIndex path with
-                            | Ok(Some index) -> indices.Add(source, index)
-                            | Ok None ->
-                                // If not found, we should build it, but normally it should have been built during processing
-                                report $"Building missing FsColbert index for {source.DisplayName}."
-                                let! index = buildIndexFromChunks report encoder passages path
-                                indices.Add(source, index)
-                            | Error err -> errors.Add err
+                            if buildMissingIndexes then
+                                match tryLoadPersistedIndex path with
+                                | Ok(Some index) -> indices.Add(source, index)
+                                | Ok None ->
+                                    report $"Building missing FsColbert index for {source.DisplayName}."
+                                    let! index = buildIndexFromChunks report encoder passages path
+                                    indices.Add(source, index)
+                                | Error err -> errors.Add err
+                            else
+                                match tryLoadBestPersistedIndex storageRoot source path with
+                                | Ok(Some candidate) ->
+                                    if candidate.isExactFingerprint then
+                                        report
+                                            $"Loaded FsColbert index for {source.DisplayName}; indexKeywords={candidate.keywordCount}."
+                                    else
+                                        report
+                                            $"Loaded best compatible FsColbert index for {source.DisplayName}; exact fingerprint was not used; indexKeywords={candidate.keywordCount}."
+
+                                    indices.Add(source, candidate.index)
+                                | Ok None ->
+                                    errors.Add
+                                        $"FsColbert index for {source.DisplayName} is missing. Reprocess the source before connecting."
+                                | Error err -> errors.Add err
 
                 let chunks =
                     indices |> Seq.collect (fun (s, idx) -> chunksFromIndex [ s ] idx) |> Seq.toList
@@ -1644,16 +1719,19 @@ Passages:
 
     let private renderedChunkMaxChars = 650
 
-    let renderContext (chunks: SourceChunk list) =
+    let renderContextWithLimit maxContextChunks (chunks: SourceChunk list) =
         if List.isEmpty chunks then
             "No selected document context was available."
         else
             chunks
-            |> List.truncate QaDefaults.maxContextChunks
+            |> List.truncate (max 1 maxContextChunks)
             |> List.mapi (fun index (chunk: SourceChunk) ->
                 let body = Text.truncate renderedChunkMaxChars chunk.text
                 $"[{index + 1}] {chunk.source.DisplayName} chunk {chunk.index}\n{body}")
             |> String.concat "\n\n"
+
+    let renderContext chunks =
+        renderContextWithLimit QaDefaults.maxContextChunks chunks
 
     let renderInventory (sources: KnowledgeSource list) =
         let enabled = sources |> List.filter _.enabled

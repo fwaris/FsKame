@@ -27,6 +27,8 @@ type SourceChunk =
       text: string
       score: float32 }
 
+type QaContextRequest = { query: string; maxResults: int }
+
 type RetrievalMode =
     | InternalDocumentIndex
     | FsColbertWithFallback
@@ -104,6 +106,16 @@ type IQaToolProvider =
     abstract ContractVersion: int
     abstract GetTools: IQaToolHost -> IQaTool list
 
+type IQaContextProvider =
+    inherit IAsyncDisposable
+
+    abstract ProviderId: string
+    abstract DisplayName: string
+    abstract Sources: KnowledgeSource list
+    abstract LoadAsync: CancellationToken -> Task<string list>
+    abstract RetrieveAsync: QaContextRequest * CancellationToken -> Task<SourceChunk list>
+    abstract InventoryAsync: CancellationToken -> Task<string>
+
 type QaTurnRequest =
     { turnId: string
       question: string
@@ -133,4 +145,10 @@ type IQaSession =
 
     abstract LoadSourcesAsync: RetrievalMode * KnowledgeSource list * CancellationToken -> Task<string list>
 
+    abstract AnswerAsync: QaTurnRequest * CancellationToken -> Task<QaAnswer>
+
+type IQaOrchestrator =
+    inherit IAsyncDisposable
+
+    abstract ConfigureAsync: IQaContextProvider list * CancellationToken -> Task<string list>
     abstract AnswerAsync: QaTurnRequest * CancellationToken -> Task<QaAnswer>

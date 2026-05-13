@@ -8,11 +8,13 @@
 
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
-    <Compile Include="UseCase.fs" />
+    <Compile Include="UseCases.fs" />
     <Compile Include="Text.fs" />
     <Compile Include="MemoryTypes.fs" />
     <Compile Include="KnowledgeSources.fs" />
+    <Compile Include="ContextProviders.fs" />
     <Compile Include="DurableMemory.fs" />
+    <Compile Include="MemoryService.fs" />
     <Compile Include="Tools.fs" />
     <Compile Include="QaSession.fs" />
   </ItemGroup>

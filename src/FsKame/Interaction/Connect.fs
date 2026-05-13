@@ -48,6 +48,9 @@ module Connect =
                             StateMachine.create
                                 parms.mailbox
                                 apiKey
+                                parms.useCase
+                                parms.useCasePlugin
+                                parms.useCaseSettings
                                 parms.oracleModel
                                 parms.retrievalMode
                                 conn

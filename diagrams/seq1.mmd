@@ -1,0 +1,22 @@
+sequenceDiagram
+    participant UI as Host UI or Voice App
+    participant Loader as Package Loader
+    participant Orch as Orchestrator
+    participant Mem as Memory Service
+    participant Ctx as Context Providers
+    participant Tool as Tool Providers
+    participant LLM as Model Clients
+
+    UI->>Loader: Select use-case packages
+    Loader->>Ctx: Load prebuilt indexes or local indexes
+    Loader->>Tool: Load package tool providers
+    Loader-->>UI: Component set ready
+
+    UI->>Orch: User turn
+    Orch->>Mem: Recall relevant memory
+    Orch->>Ctx: Retrieve use-case context
+    Orch->>Tool: Invoke selected tools
+    Orch->>LLM: Generate answer from memory, context, tools
+    LLM-->>Orch: Answer
+    Orch->>Mem: Optional writeback proposal or commit
+    Orch-->>UI: Answer, citations/context, tool observations

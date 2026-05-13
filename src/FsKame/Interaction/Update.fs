@@ -62,12 +62,19 @@ module Update =
 
     let private saveSettings model =
         Settings.setOpenAiKey model.openAiKey
-        Settings.setOracleModel model.oracleModel
-        Settings.setRetrievalMode model.retrievalMode
+        Settings.setActiveUseCaseId model.activeUseCase.id
+
+        model.modelRoleOverrides
+        |> Map.iter (fun role modelId -> Settings.setModelRoleModelId model.activeUseCase.id role modelId)
+
+        Settings.setUseCaseRetrievalMode model.activeUseCase.id model.retrievalMode
         Settings.setLogExpansions model.logExpansions
         Settings.setLogChunks model.logChunks
-        Settings.setUseLexicalFilter model.useLexicalFilter
-        Settings.setElaborateIndexKeywords model.elaborateIndexKeywords
+        Settings.setUseCaseUseLexicalFilter model.activeUseCase.id model.useLexicalFilter
+        Settings.setUseCaseElaborateIndexKeywords model.activeUseCase.id model.elaborateIndexKeywords
+
+        model.useCaseSettings
+        |> Map.iter (fun key value -> Settings.setUseCaseSetting model.activeUseCase.id key value)
 
     let private savePdfLibraryWithLog docs log =
         let saveLog =
@@ -81,20 +88,43 @@ module Update =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
 
+    let private useCaseModelRoleOverrides (definition: FsKame.QA.UseCaseDefinition) =
+        FsKame.QA.ModelRole.all
+        |> List.map (fun role ->
+            let fallback = (FsKame.QA.UseCaseDefinition.model role definition).modelId
+            role, Settings.modelRoleModelId definition.id role fallback)
+        |> Map.ofList
+
+    let private composeUseCase model =
+        UseCaseComposer.withHostOverrides
+            model.modelRoleOverrides
+            model.retrievalMode
+            model.useLexicalFilter
+            model.elaborateIndexKeywords
+            model.activeUseCase
+
     let private keywordOptions model =
         if not model.elaborateIndexKeywords then
             FsKame.QA.KnowledgeSources.KeywordGenerationOptions.disabled
         else
+            let useCase = composeUseCase model
+
+            let keywordModel = FsKame.QA.UseCaseDefinition.model FsKame.QA.Keyword useCase
+
             model.openAiKey
             |> Text.notEmpty
             |> Option.map (fun key ->
                 { FsKame.QA.KnowledgeSources.KeywordGenerationOptions.defaults with
-                    client = Some(createChatClient key C.NANO_MODEL)
-                    modelId = C.NANO_MODEL })
+                    client = Some(createChatClient key keywordModel.modelId)
+                    modelId = keywordModel.modelId
+                    useCaseProfile = useCase.profile
+                    useCaseFingerprint = FsKame.QA.UseCaseDefinition.fingerprint useCase })
             |> Option.defaultValue
                 { FsKame.QA.KnowledgeSources.KeywordGenerationOptions.defaults with
                     client = None
-                    modelId = C.NANO_MODEL }
+                    modelId = keywordModel.modelId
+                    useCaseProfile = useCase.profile
+                    useCaseFingerprint = FsKame.QA.UseCaseDefinition.fingerprint useCase }
 
     let private postSources model =
         match model.bundle with
@@ -204,7 +234,12 @@ module Update =
                 doc)
 
     let private startParams model =
+        let useCase = composeUseCase model
+
         { apiKey = model.openAiKey
+          useCase = useCase
+          useCasePlugin = model.useCasePlugin
+          useCaseSettings = model.useCaseSettings
           oracleModel = model.oracleModel
           retrievalMode = model.retrievalMode
           sources = sources model
@@ -218,22 +253,54 @@ module Update =
     let init () =
         let docs = Settings.pdfLibrary ()
 
+        let loadedUseCase, useCaseLogs =
+            UseCaseHost.loadActive (Some(Settings.activeUseCaseId ()))
+
+        Settings.setActiveUseCaseId loadedUseCase.definition.id
+
+        let modelRoleOverrides = useCaseModelRoleOverrides loadedUseCase.definition
+
+        let answerModel =
+            modelRoleOverrides
+            |> Map.tryFind FsKame.QA.Answer
+            |> Option.defaultValue (FsKame.QA.UseCaseDefinition.model FsKame.QA.Answer loadedUseCase.definition).modelId
+
+        let retrievalMode =
+            loadedUseCase.definition.runtime.retrievalMode
+            |> UseCaseComposer.fromQaRetrievalMode
+            |> Settings.useCaseRetrievalMode loadedUseCase.definition.id
+
+        let initialLog =
+            ($"FsKame ready with use case: {loadedUseCase.definition.displayName}. Add PDFs, then connect."
+             :: useCaseLogs)
+            |> List.truncate C.MAX_LOG
+
         { currentPage = Main
           mailbox = Channel.CreateBounded<Msg>(100)
           bundle = None
           sessionState = RTOpenAI.WebRTC.State.Disconnected
           openAiKey = Settings.openAiKey ()
-          oracleModel = Settings.oracleModel ()
-          retrievalMode = Settings.retrievalMode ()
+          activeUseCase = loadedUseCase.definition
+          useCasePlugin = loadedUseCase.plugin
+          useCaseSettings = Settings.useCaseSettings loadedUseCase.definition.id loadedUseCase.definition.settingsFacets
+          modelRoleOverrides = modelRoleOverrides
+          oracleModel = answerModel
+          retrievalMode = retrievalMode
           pdfDocuments = docs
-          log = [ "FsKame ready. Add PDFs, then connect." ]
+          log = initialLog
           logFontSize = 12.
           hideSecrets = true
           isBusy = false
           logExpansions = Settings.logExpansions ()
           logChunks = Settings.logChunks ()
-          useLexicalFilter = Settings.useLexicalFilter ()
-          elaborateIndexKeywords = Settings.elaborateIndexKeywords () },
+          useLexicalFilter =
+            Settings.useCaseUseLexicalFilter
+                loadedUseCase.definition.id
+                loadedUseCase.definition.runtime.useLexicalFilter
+          elaborateIndexKeywords =
+            Settings.useCaseElaborateIndexKeywords
+                loadedUseCase.definition.id
+                loadedUseCase.definition.runtime.elaborateIndexKeywords },
         Cmd.OfAsync.either installPrebuiltDocuments docs PrebuiltDocumentsInstalled EventError
 
     let update msg model =
@@ -251,7 +318,36 @@ module Update =
                 { model with
                     log = msg :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
-            | None -> { model with oracleModel = value }, Cmd.none
+            | None ->
+                { model with
+                    oracleModel = value
+                    modelRoleOverrides = model.modelRoleOverrides |> Map.add FsKame.QA.Answer value },
+                Cmd.none
+        | ModelRoleModelChanged(role, value) ->
+            match sourceConfigBlocked model $"Changing {FsKame.QA.ModelRole.storageName role} model" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let modelRoleOverrides = model.modelRoleOverrides |> Map.add role value
+
+                let oracleModel = if role = FsKame.QA.Answer then value else model.oracleModel
+
+                { model with
+                    modelRoleOverrides = modelRoleOverrides
+                    oracleModel = oracleModel },
+                Cmd.none
+        | UseCaseSettingChanged(key, value) ->
+            match sourceConfigBlocked model $"Changing {key}" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                { model with
+                    useCaseSettings = model.useCaseSettings |> Map.add key value },
+                Cmd.none
         | RetrievalModeChanged mode ->
             match sourceConfigBlocked model "Changing retrieval mode" with
             | Some msg ->

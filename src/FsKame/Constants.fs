@@ -9,6 +9,7 @@ module C =
     let SETTINGS_LOG_CHUNKS = "FsKame.LogChunks"
     let SETTINGS_USE_LEXICAL_FILTER = "FsKame.UseLexicalFilter"
     let SETTINGS_ELABORATE_INDEX_KEYWORDS = "FsKame.ElaborateIndexKeywords"
+    let SETTINGS_ACTIVE_USE_CASE = "FsKame.ActiveUseCase"
 
     let DEFAULT_ORACLE_MODEL = "gpt-5.5"
     let DEFAULT_REALTIME_MODEL = "gpt-realtime-2"

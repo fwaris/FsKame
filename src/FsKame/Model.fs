@@ -15,6 +15,9 @@ type ConnectionBundle =
 
 type StartParams =
     { apiKey: string
+      useCase: FsKame.QA.UseCaseDefinition
+      useCasePlugin: FsKame.QA.IUseCasePlugin
+      useCaseSettings: Map<string, string>
       oracleModel: string
       retrievalMode: RetrievalMode
       sources: KnowledgeSource list
@@ -31,6 +34,10 @@ and Model =
       bundle: ConnectionBundle option
       sessionState: RTOpenAI.WebRTC.State
       openAiKey: string
+      activeUseCase: FsKame.QA.UseCaseDefinition
+      useCasePlugin: FsKame.QA.IUseCasePlugin
+      useCaseSettings: Map<string, string>
+      modelRoleOverrides: Map<FsKame.QA.ModelRole, string>
       oracleModel: string
       retrievalMode: RetrievalMode
       pdfDocuments: PdfDocumentSource list
@@ -46,6 +53,8 @@ and Model =
 and Msg =
     | OpenAiKeyChanged of string
     | OracleModelChanged of string
+    | ModelRoleModelChanged of FsKame.QA.ModelRole * string
+    | UseCaseSettingChanged of string * string
     | RetrievalModeChanged of RetrievalMode
     | Settings_Show
     | Settings_Close

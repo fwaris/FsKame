@@ -26,9 +26,19 @@ type QaSessionOptions =
       retrievalMode: RetrievalMode
       clients: QaModelClients
       useCaseProfile: QaUseCaseProfile
+      prompts: PromptSet
+      modelRoles: Map<ModelRole, ModelRoleConfig>
       answerModelId: string
       keywordModelId: string
       elaborateIndexKeywords: bool
+      memoryCandidateChunks: int
+      maxContextChunks: int
+      memoryService: IMemoryService option
+      contextProviders: IQaContextProvider list
+      toolProviders: IQaToolProvider list
+      enableToolPlanner: bool
+      enableQueryExpansion: bool
+      logTimings: bool
       logExpansions: bool
       logChunks: bool
       useLexicalFilter: bool
@@ -43,9 +53,19 @@ module QaSessionOptions =
           retrievalMode = FsColbertWithFallback
           clients = QaModelClients.none
           useCaseProfile = QaUseCaseProfile.generic
+          prompts = PromptSet.empty
+          modelRoles = UseCaseDefinition.defaultModels
           answerModelId = QaDefaults.answerModel
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
+          memoryCandidateChunks = QaDefaults.memoryCandidateChunks
+          maxContextChunks = QaDefaults.maxContextChunks
+          memoryService = None
+          contextProviders = []
+          toolProviders = []
+          enableToolPlanner = true
+          enableQueryExpansion = false
+          logTimings = false
           logExpansions = false
           logChunks = false
           useLexicalFilter = true
@@ -59,13 +79,23 @@ type private PlannedToolCall =
       arguments: IReadOnlyDictionary<string, string> }
 
 type QaSession(options: QaSessionOptions) =
-    let mutable retrieval = KnowledgeSources.emptyIndex
+    let mutable contextProviders = options.contextProviders
 
     let memoryPath =
         options.memoryStorePath
         |> Option.defaultValue (DurableMemory.defaultPath options.storageRoot)
 
-    let mutable memoryStore, memoryLogs = DurableMemory.load memoryPath
+    let currentMemoryEncoder () =
+        contextProviders
+        |> List.tryPick (fun provider ->
+            match provider with
+            | :? FsColbertContextProvider as fsColbert -> fsColbert.Retrieval.encoder
+            | _ -> None)
+
+    let memoryService =
+        options.memoryService
+        |> Option.defaultValue (DurableMemoryService(memoryPath, currentMemoryEncoder) :> IMemoryService)
+
     let blackboard = ResizeArray<QaToolObservation>()
 
     let report message = options.report message
@@ -115,6 +145,87 @@ type QaSession(options: QaSessionOptions) =
                 $"[{index + 1}] {observation.pluginName}.{observation.toolName}\n{Text.truncate 900 observation.content}")
             |> String.concat "\n\n"
 
+    let modelConfig role =
+        options.modelRoles
+        |> Option.ofObj
+        |> Option.bind (Map.tryFind role)
+        |> Option.orElse (UseCaseDefinition.defaultModels |> Map.tryFind role)
+        |> Option.defaultValue (ModelRoleConfig.create options.answerModelId)
+
+    let roleMaxTokens role fallback =
+        (modelConfig role).maxOutputTokens |> Option.defaultValue fallback
+
+    let renderTemplate replacements (template: string) =
+        replacements
+        |> List.fold (fun (text: string) (name, value) -> text.Replace("{{" + name + "}}", value)) template
+
+    let isBuiltInContextTool (tool: IQaTool) =
+        String.Equals(tool.PluginName, "FsKameTools", StringComparison.OrdinalIgnoreCase)
+        && ([ "selected_source_search"
+              "source_inventory"
+              "durable_memory_search"
+              "blackboard_search" ]
+            |> List.exists (fun name -> String.Equals(tool.Name, name, StringComparison.OrdinalIgnoreCase)))
+
+    let hasPlannerCandidateTools (catalog: QaToolCatalog) =
+        catalog.tools |> List.exists (isBuiltInContextTool >> not)
+
+    let retrieveContext question maxResults cancellationToken =
+        async {
+            let request =
+                { query = question
+                  maxResults = clamp options.memoryCandidateChunks maxResults }
+
+            let! results =
+                contextProviders
+                |> List.map (fun provider ->
+                    async {
+                        try
+                            let! chunks = provider.RetrieveAsync(request, cancellationToken) |> Async.AwaitTask
+                            return chunks
+                        with ex ->
+                            report $"Context provider {provider.DisplayName} failed: {ex.Message}"
+                            return []
+                    })
+                |> Async.Parallel
+
+            return
+                results
+                |> Array.toList
+                |> List.collect id
+                |> List.sortByDescending _.score
+                |> List.truncate request.maxResults
+        }
+
+    let contextInventory cancellationToken =
+        task {
+            if List.isEmpty contextProviders then
+                return "No selected source context providers are loaded."
+            else
+                let! inventories =
+                    contextProviders
+                    |> List.map (fun provider ->
+                        task {
+                            try
+                                return! provider.InventoryAsync cancellationToken
+                            with ex ->
+                                report $"Context provider {provider.DisplayName} inventory failed: {ex.Message}"
+                                return $"No inventory was available for {provider.DisplayName}."
+                        })
+                    |> Task.WhenAll
+
+                return
+                    inventories
+                    |> Array.toList
+                    |> List.filter (String.IsNullOrWhiteSpace >> not)
+                    |> String.concat "\n\n"
+        }
+
+    let contextSources () =
+        contextProviders
+        |> List.collect _.Sources
+        |> List.distinctBy (fun source -> source.kind, source.location)
+
     let renderTypedMemory decision hits =
         let memories = DurableMemory.renderRecall hits
         let policy = DurableMemory.renderRecallSpec decision
@@ -127,21 +238,30 @@ type QaSession(options: QaSessionOptions) =
         (chunks: SourceChunk list)
         (observations: QaToolObservation list)
         =
-        let sourceContext = KnowledgeSources.renderContext chunks
-        let inventory = KnowledgeSources.renderInventory retrieval.sources
+        let sourceContext =
+            KnowledgeSources.renderContextWithLimit options.maxContextChunks chunks
+
+        let inventory = KnowledgeSources.renderInventory (contextSources ())
         let typedMemory = renderTypedMemory decision memoryHits
         let toolObservations = renderObservations observations
 
-        [ ChatMessage(
-              ChatRole.System,
-              (options.useCaseProfile.answerSystemInstruction
-               |> Option.defaultValue
-                   "You are FsKame's reusable QA backend. Answer from selected knowledge sources, durable memory, and tool observations when they are relevant. Treat tool observations as authoritative for current facts. Do not invent citations, source details, tool results, or live values. If the selected sources and tools do not contain enough information, say that plainly. Keep answers concise and useful.")
-          )
-          ChatMessage(
-              ChatRole.User,
-              $"User question:\n{snapshot.text}\n\nTyped durable memory:\n{typedMemory}\n\nTool observations:\n{toolObservations}\n\nSelected source inventory:\n{inventory}\n\nMatched source context:\n{sourceContext}\n\nReturn only the answer."
-          ) ]
+        let systemPrompt =
+            options.prompts.answerSystem
+            |> Option.orElse options.useCaseProfile.answerSystemInstruction
+            |> Option.defaultValue DefaultUseCasePrompts.answerSystem
+
+        let userPrompt =
+            options.prompts.answerUserTemplate
+            |> Option.defaultValue DefaultUseCasePrompts.answerUserTemplate
+            |> renderTemplate
+                [ "question", snapshot.text
+                  "typedMemory", typedMemory
+                  "toolObservations", toolObservations
+                  "sourceInventory", inventory
+                  "sourceContext", sourceContext ]
+
+        [ ChatMessage(ChatRole.System, systemPrompt)
+          ChatMessage(ChatRole.User, userPrompt) ]
 
     let createSnapshot (request: QaTurnRequest) =
         { turnId = request.turnId
@@ -186,7 +306,7 @@ type QaSession(options: QaSessionOptions) =
                   yield
                       { tool = tool
                         query = question
-                        maxResults = QaDefaults.memoryCandidateChunks
+                        maxResults = options.memoryCandidateChunks
                         arguments = makeArgs [] }
               | None -> ()
 
@@ -206,9 +326,8 @@ type QaSession(options: QaSessionOptions) =
                   yield
                       { tool = tool
                         query = question
-                        maxResults = QaDefaults.memoryCandidateChunks
-                        arguments =
-                          makeArgs [ "query", question; "max_results", string QaDefaults.memoryCandidateChunks ] }
+                        maxResults = options.memoryCandidateChunks
+                        arguments = makeArgs [ "query", question; "max_results", string options.memoryCandidateChunks ] }
               | None -> () ]
 
     let tryJsonString (name: string) (element: JsonElement) =
@@ -233,23 +352,17 @@ type QaSession(options: QaSessionOptions) =
         |> Option.defaultValue fallback
 
     let toolPlanPrompt question (catalog: QaToolCatalog) =
-        [ ChatMessage(
-              ChatRole.System,
-              "You are a conservative tool planner. Return compact JSON only. Select a tool only when it is clearly useful for the user question."
-          )
-          ChatMessage(
-              ChatRole.User,
-              $"""Available tools:
-{renderToolInventory catalog}
+        let systemPrompt =
+            options.prompts.toolPlannerSystem
+            |> Option.defaultValue DefaultUseCasePrompts.toolPlannerSystem
 
-Question:
-{question}
+        let userPrompt =
+            options.prompts.toolPlannerUserTemplate
+            |> Option.defaultValue DefaultUseCasePrompts.toolPlannerUserTemplate
+            |> renderTemplate [ "toolInventory", renderToolInventory catalog; "question", question ]
 
-Return JSON:
-{{"calls":[{{"plugin":"FsKameTools","tool":"source_inventory","query":"...","max_results":3,"arguments":{{"query":"..."}}}}]}}
-
-Use an empty calls array when no tool is needed."""
-          ) ]
+        [ ChatMessage(ChatRole.System, systemPrompt)
+          ChatMessage(ChatRole.User, userPrompt) ]
 
     let parseToolPlan (catalog: QaToolCatalog) (text: string) =
         try
@@ -325,12 +438,14 @@ Use an empty calls array when no tool is needed."""
 
     let runToolPlanner (catalog: QaToolCatalog) question cancellationToken =
         async {
-            match options.clients.toolPlanner with
-            | None -> return []
-            | Some client ->
+            match options.enableToolPlanner, hasPlannerCandidateTools catalog, options.clients.toolPlanner with
+            | false, _, _
+            | _, false, _
+            | _, _, None -> return []
+            | true, true, Some client ->
                 try
                     let opts = ChatOptions()
-                    opts.MaxOutputTokens <- Nullable 500
+                    opts.MaxOutputTokens <- Nullable(roleMaxTokens Planner 500)
 
                     let! response =
                         client.GetResponseAsync(toolPlanPrompt question catalog, opts, cancellationToken)
@@ -382,16 +497,7 @@ Use an empty calls array when no tool is needed."""
             member _.Report message = report message
 
             member _.SearchKnowledgeAsync(question, maxResults, cancellationToken) =
-                KnowledgeSources.rankWithProfile
-                    options.useCaseProfile
-                    options.clients.queryExpansion
-                    options.logExpansions
-                    options.logChunks
-                    options.useLexicalFilter
-                    report
-                    question
-                    maxResults
-                    retrieval
+                retrieveContext question maxResults cancellationToken
                 |> Async.StartAsTask
                 |> fun task ->
                     task.ContinueWith(
@@ -399,36 +505,10 @@ Use an empty calls array when no tool is needed."""
                         cancellationToken
                     )
 
-            member _.SourceInventoryAsync _ =
-                Task.FromResult(KnowledgeSources.renderInventory retrieval.sources)
+            member _.SourceInventoryAsync cancellationToken = contextInventory cancellationToken
 
             member _.SearchMemoryAsync(query, maxResults, cancellationToken) =
-                let budget = if maxResults <= 20 then Fast else Medium
-
-                let spec =
-                    { query = Text.normalizeWhitespace query
-                      kinds = [ Directive; Decision; Claim; Commitment; Episode ]
-                      scopes = [ Session; User; Workspace; Global ]
-                      namespaceId = DurableMemory.defaultNamespace
-                      temporalMode = CurrentOnly
-                      temporalReference = None
-                      includeSuperseded = false
-                      recallBudget = budget
-                      maxCandidates = clamp 60 maxResults
-                      minScore = None
-                      latencyBudget =
-                        if budget = Fast then
-                            TimeSpan.FromMilliseconds 90.
-                        else
-                            TimeSpan.FromMilliseconds 180. }
-
-                DurableMemory.recall retrieval.encoder spec memoryStore
-                |> Async.StartAsTask
-                |> fun task ->
-                    task.ContinueWith(
-                        (fun (t: Task<MemoryRecallHit list>) -> DurableMemory.renderRecall t.Result),
-                        cancellationToken
-                    )
+                memoryService.SearchAsync(query, maxResults, cancellationToken)
 
             member _.SearchBlackboardAsync(query, _) =
                 let query = Text.normalizeWhitespace query
@@ -453,10 +533,11 @@ Use an empty calls array when no tool is needed."""
 
                 Task.FromResult content }
 
-    let mutable catalog = QaToolLoader.load host options.toolProviderDirectory
+    let mutable catalog =
+        QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
 
     do
-        for log in memoryLogs @ catalog.logs do
+        for log in memoryService.StartupLogs @ catalog.logs do
             report log
 
     let answerWithModel
@@ -473,10 +554,12 @@ Use an empty calls array when no tool is needed."""
             | Some client ->
                 let opts = ChatOptions()
 
-                if ModelCapabilities.supportsTemperature options.answerModelId then
-                    opts.Temperature <- Nullable 0.2f
+                let answerConfig = modelConfig Answer
 
-                opts.MaxOutputTokens <- Nullable 300
+                if ModelCapabilities.supportsTemperature options.answerModelId then
+                    opts.Temperature <- Nullable(answerConfig.temperature |> Option.defaultValue 0.2f)
+
+                opts.MaxOutputTokens <- Nullable(roleMaxTokens Answer 300)
 
                 let! response =
                     client.GetResponseAsync(
@@ -491,9 +574,8 @@ Use an empty calls array when no tool is needed."""
 
     let applyWriteback (snapshot: TranscriptSnapshot) (answer: string) =
         if options.autoWriteback then
-            let proposals = DurableMemory.proposalsFromExchange snapshot answer
-            let updated, updates, logs = DurableMemory.commitProposals memoryStore proposals
-            memoryStore <- updated
+            let proposals = memoryService.ProposalsFromExchange(snapshot, answer)
+            let updates, logs = memoryService.CommitProposals proposals
 
             for update in updates do
                 report update.message
@@ -503,84 +585,130 @@ Use an empty calls array when no tool is needed."""
 
     member _.ToolCatalog = catalog
 
-    member _.LoadSourcesAsync(mode, sources, cancellationToken) =
+    member _.ConfigureAsync(providers: IQaContextProvider list, cancellationToken) =
         task {
-            let sources = sources |> List.filter _.enabled
-            report $"Loading {sources.Length} knowledge source(s) with {RetrievalModes.displayName mode}."
+            for provider in contextProviders do
+                do! provider.DisposeAsync().AsTask()
 
-            let loadWork =
-                match mode with
-                | InternalDocumentIndex -> KnowledgeSources.loadInternalIndex sources
-                | FsColbertWithFallback ->
-                    let keywordOptions =
-                        { KnowledgeSources.KeywordGenerationOptions.defaults with
-                            enabled = options.elaborateIndexKeywords
-                            client = options.clients.queryExpansion
-                            modelId = options.keywordModelId
-                            useCaseProfile = options.useCaseProfile }
+            contextProviders <- providers
 
-                    KnowledgeSources.loadIndex options.storageRoot report keywordOptions sources
+            let! results =
+                contextProviders
+                |> List.map (fun provider ->
+                    task {
+                        try
+                            return! provider.LoadAsync cancellationToken
+                        with ex ->
+                            return [ $"Context provider {provider.DisplayName} failed to load: {ex.Message}" ]
+                    })
+                |> Task.WhenAll
 
-            let! loaded, errors = loadWork |> Async.StartAsTask
-
-            KnowledgeSources.disposeIndex retrieval
-            retrieval <- loaded
-            report $"Loaded {retrieval.chunks.Length} source chunk(s)."
-
-            catalog <- QaToolLoader.load host options.toolProviderDirectory
+            catalog <- QaToolLoader.loadWithProviders host options.toolProviderDirectory options.toolProviders
 
             for log in catalog.logs do
                 report log
 
-            return errors
+            return results |> Array.toList |> List.collect id
+        }
+
+    member this.LoadSourcesAsync(mode, sources, cancellationToken) =
+        task {
+            let providerOptions =
+                { FsColbertContextProviderOptions.create options.storageRoot mode sources with
+                    queryExpansionClient =
+                        if options.enableQueryExpansion then
+                            options.clients.queryExpansion
+                        else
+                            None
+                    keywordGenerationClient = options.clients.queryExpansion
+                    useCaseProfile = options.useCaseProfile
+                    useCaseFingerprint =
+                        { UseCaseDefinition.generic with
+                            id = options.useCaseProfile.id
+                            displayName = options.useCaseProfile.displayName
+                            description = options.useCaseProfile.description
+                            profile = options.useCaseProfile
+                            prompts = options.prompts
+                            models = options.modelRoles
+                            runtime =
+                                { UseCaseRuntimeOptions.defaults with
+                                    retrievalMode = mode
+                                    enableToolPlanner = options.enableToolPlanner
+                                    enableQueryExpansion = options.enableQueryExpansion
+                                    elaborateIndexKeywords = options.elaborateIndexKeywords
+                                    useLexicalFilter = options.useLexicalFilter
+                                    autoWriteback = options.autoWriteback } }
+                        |> UseCaseDefinition.fingerprint
+                    keywordModelId = options.keywordModelId
+                    elaborateIndexKeywords = options.elaborateIndexKeywords
+                    logExpansions = options.logExpansions
+                    logChunks = options.logChunks
+                    useLexicalFilter = options.useLexicalFilter
+                    report = report }
+
+            let provider = FsColbertContextProvider providerOptions :> IQaContextProvider
+            return! this.ConfigureAsync([ provider ], cancellationToken)
         }
 
     member _.AnswerAsync(request: QaTurnRequest, cancellationToken) =
         task {
+            let totalSw = Stopwatch.StartNew()
             let snapshot = createSnapshot request
 
             let decision =
-                DurableMemory.createSupervisorDecision snapshot request.realtimeJudgement
+                memoryService.CreateSupervisorDecision(snapshot, request.realtimeJudgement)
 
             let memoryTask =
-                DurableMemory.recall retrieval.encoder decision.recallSpec memoryStore
-                |> Async.StartAsTask
+                task {
+                    let sw = Stopwatch.StartNew()
+                    let! hits = memoryService.RecallAsync(decision, cancellationToken)
+                    sw.Stop()
+                    return hits, sw.Elapsed.TotalMilliseconds
+                }
 
             let sourceTask =
                 task {
                     let sw = Stopwatch.StartNew()
 
                     let! chunks =
-                        KnowledgeSources.rankWithProfile
-                            options.useCaseProfile
-                            options.clients.queryExpansion
-                            options.logExpansions
-                            options.logChunks
-                            options.useLexicalFilter
-                            report
-                            snapshot.text
-                            QaDefaults.memoryCandidateChunks
-                            retrieval
+                        retrieveContext snapshot.text options.memoryCandidateChunks cancellationToken
                         |> Async.StartAsTask
 
                     sw.Stop()
                     return chunks, sw.Elapsed.TotalMilliseconds
                 }
 
+            let plannerSw = Stopwatch.StartNew()
             let plannedTools = deterministicPlan catalog snapshot.text
             let! llmTools = runToolPlanner catalog snapshot.text cancellationToken |> Async.StartAsTask
+            plannerSw.Stop()
+
+            let toolSw = Stopwatch.StartNew()
             let! observations = invokeTools (plannedTools @ llmTools) cancellationToken |> Async.StartAsTask
-            let! memoryHits = memoryTask
+            toolSw.Stop()
+
+            let! memoryHits, memoryElapsedMs = memoryTask
             let! chunks, sourceRetrievalElapsedMs = sourceTask
 
             for observation in observations do
                 blackboard.Add observation
 
+            let answerSw = Stopwatch.StartNew()
+
             let! answer =
                 answerWithModel snapshot decision memoryHits chunks observations cancellationToken
                 |> Async.StartAsTask
 
+            answerSw.Stop()
+
+            let writebackSw = Stopwatch.StartNew()
             applyWriteback snapshot answer
+            writebackSw.Stop()
+            totalSw.Stop()
+
+            if options.logTimings then
+                report
+                    $"QA timing: total={totalSw.Elapsed.TotalMilliseconds:F0}ms; source={sourceRetrievalElapsedMs:F0}ms; memory={memoryElapsedMs:F0}ms; planner={plannerSw.Elapsed.TotalMilliseconds:F0}ms; tools={toolSw.Elapsed.TotalMilliseconds:F0}ms; answer={answerSw.Elapsed.TotalMilliseconds:F0}ms; writeback={writebackSw.Elapsed.TotalMilliseconds:F0}ms; toolObservations={observations.Length}."
 
             return
                 { turnId = request.turnId
@@ -588,21 +716,16 @@ Use an empty calls array when no tool is needed."""
                   model = options.answerModelId
                   context = chunks
                   sourceRetrievalElapsedMs = sourceRetrievalElapsedMs
-                  inventory = retrieval.sources
+                  inventory = contextSources ()
                   toolObservations = observations
                   timedOut = false
                   createdAt = DateTimeOffset.UtcNow }
         }
 
-    interface IQaSession with
-        member this.LoadSourcesAsync(mode, sources, cancellationToken) =
-            this.LoadSourcesAsync(mode, sources, cancellationToken)
-
-        member this.AnswerAsync(request, cancellationToken) =
-            this.AnswerAsync(request, cancellationToken)
-
+    interface IAsyncDisposable with
         member _.DisposeAsync() =
-            KnowledgeSources.disposeIndex retrieval
+            for provider in contextProviders do
+                provider.DisposeAsync().AsTask().GetAwaiter().GetResult()
 
             for client in
                 [ options.clients.queryExpansion
@@ -612,3 +735,17 @@ Use an empty calls array when no tool is needed."""
                 client.Dispose()
 
             ValueTask()
+
+    interface IQaSession with
+        member this.LoadSourcesAsync(mode, sources, cancellationToken) =
+            this.LoadSourcesAsync(mode, sources, cancellationToken)
+
+        member this.AnswerAsync(request, cancellationToken) =
+            this.AnswerAsync(request, cancellationToken)
+
+    interface IQaOrchestrator with
+        member this.ConfigureAsync(providers, cancellationToken) =
+            this.ConfigureAsync(providers, cancellationToken)
+
+        member this.AnswerAsync(request, cancellationToken) =
+            this.AnswerAsync(request, cancellationToken)
