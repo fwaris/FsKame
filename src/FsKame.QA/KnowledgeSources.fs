@@ -83,94 +83,83 @@ module KnowledgeSources =
 
     let private fsKameChunkOptions = FsColbert.ChunkOptions.fsKameDefaults
 
-    [<CLIMutable>]
-    type private JsonKnowledgeDocument =
+    [<AllowNullLiteral>]
+    type JsonKnowledgeDocumentDto() =
+        member val id: string = null with get, set
+        member val label: string = null with get, set
+        member val key: string = null with get, set
+        member val title: string = null with get, set
+        member val heading: string = null with get, set
+        member val name: string = null with get, set
+        member val text: string = null with get, set
+        member val body: string = null with get, set
+        member val answer: string = null with get, set
+        member val content: string = null with get, set
+        member val keywords: string array = null with get, set
+
+    [<AllowNullLiteral>]
+    type JsonKnowledgeEnvelopeDto() =
+        member val documents: JsonKnowledgeDocumentDto array = null with get, set
+
+    type JsonKnowledgeDocument =
         { id: string
           title: string
           text: string
           keywords: string list }
 
-    let private tryJsonStringProperty (name: string) (root: JsonElement) =
-        let mutable property = Unchecked.defaultof<JsonElement>
+    let private jsonOptions =
+        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+        options.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+        options.NumberHandling <- JsonNumberHandling.AllowReadingFromString
+        options.Converters.Add(JsonFSharpConverter())
+        options
 
-        if root.ValueKind = JsonValueKind.Object && root.TryGetProperty(name, &property) then
-            match property.ValueKind with
-            | JsonValueKind.String -> property.GetString() |> Text.notEmpty
-            | JsonValueKind.Number -> property.GetRawText() |> Text.notEmpty
-            | JsonValueKind.True -> Some "true"
-            | JsonValueKind.False -> Some "false"
-            | _ -> None
-        else
+    let private tryDeserialize<'T> (text: string) =
+        try
+            JsonSerializer.Deserialize<'T>(text, jsonOptions) |> Some
+        with _ ->
             None
 
-    let private tryJsonStringListProperty (name: string) (root: JsonElement) =
-        let mutable property = Unchecked.defaultof<JsonElement>
-
-        if root.ValueKind = JsonValueKind.Object && root.TryGetProperty(name, &property) then
-            match property.ValueKind with
-            | JsonValueKind.Array ->
-                property.EnumerateArray()
-                |> Seq.choose (fun item ->
-                    if item.ValueKind = JsonValueKind.String then
-                        item.GetString() |> Text.notEmpty
-                    else
-                        None)
-                |> Seq.distinctBy _.ToLowerInvariant()
-                |> Seq.toList
-            | JsonValueKind.String ->
-                property.GetString()
-                |> Option.ofObj
-                |> Option.map (fun value ->
-                    value.Split(
-                        [| ','; ';'; '|' |],
-                        StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries
-                    )
-                    |> Array.choose Text.notEmpty
-                    |> Array.distinctBy _.ToLowerInvariant()
-                    |> Array.toList)
-                |> Option.defaultValue []
-            | _ -> []
-        else
-            []
-
-    let private tryJsonKnowledgeDocument (root: JsonElement) =
-        let text =
-            [ "text"; "body"; "answer"; "content" ]
-            |> List.tryPick (fun name -> tryJsonStringProperty name root)
-
-        text
+    let private normalizeJsonKnowledgeDocument (item: JsonKnowledgeDocumentDto) =
+        Option.ofObj item.text
+        |> Option.orElse (Option.ofObj item.body)
+        |> Option.orElse (Option.ofObj item.answer)
+        |> Option.orElse (Option.ofObj item.content)
+        |> Option.bind Text.notEmpty
         |> Option.map (fun text ->
             { id =
-                [ "id"; "label"; "key" ]
-                |> List.tryPick (fun name -> tryJsonStringProperty name root)
+                [ item.id; item.label; item.key ]
+                |> List.choose Option.ofObj
+                |> List.tryHead
                 |> Option.defaultValue ""
               title =
-                [ "title"; "heading"; "name" ]
-                |> List.tryPick (fun name -> tryJsonStringProperty name root)
+                [ item.title; item.heading; item.name ]
+                |> List.choose Option.ofObj
+                |> List.tryHead
                 |> Option.defaultValue ""
               text = text
-              keywords = tryJsonStringListProperty "keywords" root })
+              keywords =
+                Option.ofObj item.keywords
+                |> Option.map Array.toList
+                |> Option.defaultValue []
+                |> List.choose Text.notEmpty
+                |> List.distinctBy _.ToLowerInvariant() })
 
-    let private jsonKnowledgeDocuments (root: JsonElement) =
-        match root.ValueKind with
-        | JsonValueKind.Array -> root.EnumerateArray() |> Seq.choose tryJsonKnowledgeDocument |> Seq.toList
-        | JsonValueKind.Object ->
-            let mutable documents = Unchecked.defaultof<JsonElement>
-
-            if
-                root.TryGetProperty("documents", &documents)
-                && documents.ValueKind = JsonValueKind.Array
-            then
-                documents.EnumerateArray() |> Seq.choose tryJsonKnowledgeDocument |> Seq.toList
-            else
-                tryJsonKnowledgeDocument root |> Option.toList
-        | _ -> []
+    let private jsonKnowledgeDocuments (text: string) =
+        tryDeserialize<JsonKnowledgeDocumentDto list> text
+        |> Option.orElseWith (fun () ->
+            tryDeserialize<JsonKnowledgeEnvelopeDto> text
+            |> Option.bind (fun envelope -> Option.ofObj envelope.documents |> Option.map Array.toList))
+        |> Option.orElseWith (fun () ->
+            tryDeserialize<JsonKnowledgeDocumentDto> text
+            |> Option.map List.singleton)
+        |> Option.defaultValue []
+        |> List.choose normalizeJsonKnowledgeDocument
 
     let private jsonPassages (passageSource: FsColbert.PassageSource) path =
         async {
             try
-                use document = JsonDocument.Parse(File.ReadAllText path)
-                let documents = jsonKnowledgeDocuments document.RootElement
+                let documents = jsonKnowledgeDocuments (File.ReadAllText path)
 
                 if List.isEmpty documents then
                     return Error $"No JSON knowledge documents were found in {path}."
@@ -987,101 +976,17 @@ Query: {query}
                 || details.Contains("structured output")
                 || details.Contains("schema")))
 
-    let private tryReadStringProperty (name: string) (root: JsonElement) =
-        let mutable property = Unchecked.defaultof<JsonElement>
-
-        if
-            root.TryGetProperty(name, &property)
-            && property.ValueKind = JsonValueKind.String
-        then
-            property.GetString() |> Text.notEmpty
-        else
-            None
-
-    let private tryReadIntProperty (name: string) (root: JsonElement) =
-        let mutable property = Unchecked.defaultof<JsonElement>
-
-        if
-            root.TryGetProperty(name, &property)
-            && property.ValueKind = JsonValueKind.Number
-        then
-            match property.TryGetInt32() with
-            | true, value -> Some value
-            | _ -> None
-        else
-            None
-
-    let private tryReadStringListProperty (name: string) (root: JsonElement) =
-        let mutable property = Unchecked.defaultof<JsonElement>
-
-        if root.TryGetProperty(name, &property) && property.ValueKind = JsonValueKind.Array then
-            property.EnumerateArray()
-            |> Seq.choose (fun item ->
-                if item.ValueKind = JsonValueKind.String then
-                    item.GetString() |> Text.notEmpty
-                else
-                    None)
-            |> Seq.toList
-            |> Some
-        else
-            None
-
-    let private tryReadPassageKeywordItem (root: JsonElement) =
-        match tryReadIntProperty "passageIndex" root, tryReadStringListProperty "keywords" root with
-        | Some passageIndex, Some keywords ->
-            Some
-                { passageIndex = passageIndex
-                  keywords = cleanKeywords 16 keywords }
-        | _ -> None
+    type private PassageKeywordBatch = { items: PassageKeywordItem list option }
 
     let private readKeywordBatch (text: string) =
-        try
-            use document = JsonDocument.Parse text
-            let root = document.RootElement
-            let mutable items = Unchecked.defaultof<JsonElement>
-
-            if root.TryGetProperty("items", &items) && items.ValueKind = JsonValueKind.Array then
-                items.EnumerateArray() |> Seq.choose tryReadPassageKeywordItem |> Seq.toList
-            else
-                []
-        with _ ->
-            []
+        tryDeserialize<PassageKeywordBatch> text
+        |> Option.bind _.items
+        |> Option.defaultValue []
+        |> List.map (fun item -> { item with keywords = cleanKeywords 16 item.keywords })
 
     let private tryReadKeywordCacheRecord (line: string) =
-        try
-            use document = JsonDocument.Parse line
-            let root = document.RootElement
-
-            match
-                tryReadStringProperty "key" root,
-                tryReadStringProperty "sourceFingerprint" root,
-                tryReadIntProperty "passageIndex" root,
-                tryReadStringProperty "textHash" root,
-                tryReadStringProperty "modelId" root,
-                tryReadStringProperty "schemaVersion" root,
-                tryReadStringProperty "profileFingerprint" root,
-                tryReadStringListProperty "keywords" root
-            with
-            | Some key,
-              Some sourceFingerprint,
-              Some passageIndex,
-              Some textHash,
-              Some modelId,
-              Some schemaVersion,
-              Some profileFingerprint,
-              Some keywords ->
-                Some
-                    { key = key
-                      sourceFingerprint = sourceFingerprint
-                      passageIndex = passageIndex
-                      textHash = textHash
-                      modelId = modelId
-                      schemaVersion = schemaVersion
-                      profileFingerprint = profileFingerprint
-                      keywords = cleanKeywords 16 keywords }
-            | _ -> None
-        with _ ->
-            None
+        tryDeserialize<KeywordCacheRecord> line
+        |> Option.map (fun record -> { record with keywords = cleanKeywords 16 record.keywords })
 
     let private loadKeywordCache path sourceFingerprint (options: KeywordGenerationOptions) =
         if File.Exists path then
@@ -1761,6 +1666,11 @@ Passages:
                 let! encoder = loadEncoder storageRoot
                 let indices = ResizeArray<KnowledgeSource * FsColbert.ColbertIndex>()
                 let errors = ResizeArray<string>()
+                let keywordOptions =
+                    if buildMissingIndexes then
+                        keywordOptions
+                    else
+                        { keywordOptions with client = None }
 
                 for source in sources do
                     match tryLoadPrebuiltIndex storageRoot source with

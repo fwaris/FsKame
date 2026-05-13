@@ -13,6 +13,35 @@ open RTFlow
 open RTFlow.Functions
 
 module VoiceAgent =
+    type private ToolQuestionArgs = { question: string option }
+
+    type private RealtimeJudgementDto =
+        { turn_kind: string option
+          topic_continuity: string option
+          memory_action: string option
+          needs_external_context: bool option
+          confidence: float option
+          sensitive: bool option
+          memory_mutation: bool option
+          conflict_likely: bool option
+          memory_need: string option
+          tool_need: string option }
+
+    type private RealtimeJudgementEnvelope =
+        { realtime_judgement: RealtimeJudgementDto option }
+
+    let private jsonOptions =
+        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+        options.NumberHandling <- JsonNumberHandling.AllowReadingFromString
+        options.Converters.Add(JsonFSharpConverter())
+        options
+
+    let private tryDeserialize<'T> (text: string) =
+        try
+            JsonSerializer.Deserialize<'T>(text, jsonOptions) |> Some
+        with _ ->
+            None
+
     module private ToolNames =
         [<Literal>]
         let QUERY_ORACLE = "QUERY_ORACLE"
@@ -308,81 +337,24 @@ After QUERY_ORACLE returns:
         if String.IsNullOrWhiteSpace content then
             ""
         else
-            try
-                use doc = JsonDocument.Parse(content)
-                let mutable prop = Unchecked.defaultof<JsonElement>
-
-                if
-                    doc.RootElement.TryGetProperty("question", &prop)
-                    && prop.ValueKind = JsonValueKind.String
-                then
-                    prop.GetString()
-                    |> Option.ofObj
-                    |> Option.defaultValue ""
-                    |> FsKame.Text.normalizeWhitespace
-                else
-                    content
-            with _ ->
-                content
-
-    let private tryJsonString (root: JsonElement) (name: string) =
-        let mutable prop = Unchecked.defaultof<JsonElement>
-
-        if root.TryGetProperty(name, &prop) then
-            match prop.ValueKind with
-            | JsonValueKind.String -> prop.GetString() |> Option.ofObj |> Option.bind FsKame.Text.notEmpty
-            | JsonValueKind.Number -> Some(prop.GetRawText())
-            | JsonValueKind.True -> Some "true"
-            | JsonValueKind.False -> Some "false"
-            | _ -> None
-        else
-            None
-
-    let private tryJsonBool (root: JsonElement) name =
-        tryJsonString root name
-        |> Option.exists (fun value ->
-            String.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
-            || String.Equals(value, "yes", StringComparison.OrdinalIgnoreCase)
-            || value = "1")
-
-    let private tryJsonBoolOption (root: JsonElement) name =
-        tryJsonString root name
-        |> Option.bind (fun value ->
-            if
-                String.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
-                || String.Equals(value, "yes", StringComparison.OrdinalIgnoreCase)
-                || value = "1"
-            then
-                Some true
-            elif
-                String.Equals(value, "false", StringComparison.OrdinalIgnoreCase)
-                || String.Equals(value, "no", StringComparison.OrdinalIgnoreCase)
-                || value = "0"
-            then
-                Some false
-            else
-                None)
-
-    let private tryJsonFloat (root: JsonElement) name =
-        tryJsonString root name
-        |> Option.bind (fun value ->
-            match Double.TryParse value with
-            | true, parsed -> Some parsed
-            | false, _ -> None)
+            tryDeserialize<ToolQuestionArgs> content
+            |> Option.bind _.question
+            |> Option.map FsKame.Text.normalizeWhitespace
+            |> Option.defaultValue content
 
     let private stringIsAny values value =
         values
         |> List.exists (fun candidate -> String.Equals(candidate, value, StringComparison.OrdinalIgnoreCase))
 
-    let private memoryActionFromLegacy (root: JsonElement) =
-        match tryJsonString root "memory_need" with
+    let private memoryActionFromLegacy (dto: RealtimeJudgementDto) =
+        match dto.memory_need with
         | Some value when stringIsAny [ "writeback"; "remember"; "typed_recall" ] value -> Some "remember"
         | Some value when stringIsAny [ "forget"; "delete" ] value -> Some "forget"
         | Some value when stringIsAny [ "correct"; "correction" ] value -> Some "correct"
         | _ -> None
 
-    let private needsExternalContextFromLegacy (root: JsonElement) =
-        match tryJsonString root "tool_need" with
+    let private needsExternalContextFromLegacy (dto: RealtimeJudgementDto) =
+        match dto.tool_need with
         | Some value when stringIsAny [ "none"; "unknown" ] value -> Some false
         | Some _ -> Some true
         | None -> None
@@ -399,64 +371,60 @@ After QUERY_ORACLE returns:
         | _ -> false
 
     let private tryRealtimeJudgement (content: string) =
-        try
-            use doc = JsonDocument.Parse(content)
+        let parsed =
+            tryDeserialize<RealtimeJudgementEnvelope> content
+            |> Option.bind _.realtime_judgement
+            |> Option.orElseWith (fun () -> tryDeserialize<RealtimeJudgementDto> content)
 
-            let root =
-                let mutable nested = Unchecked.defaultof<JsonElement>
-
-                if doc.RootElement.TryGetProperty("realtime_judgement", &nested) then
-                    nested
-                else
-                    doc.RootElement
-
+        match parsed with
+        | None -> None
+        | Some dto ->
             let hasAnyHint =
-                [ "turn_kind"
-                  "topic_continuity"
-                  "memory_action"
-                  "needs_external_context"
-                  "confidence"
-                  "sensitive"
-                  // Backward-compatible parse for old realtime sessions.
-                  "memory_need"
-                  "tool_need"
-                  "memory_mutation"
-                  "conflict_likely" ]
-                |> List.exists (fun name -> tryJsonString root name |> Option.isSome)
+                [ dto.turn_kind
+                  dto.topic_continuity
+                  dto.memory_action
+                  dto.needs_external_context |> Option.map string
+                  dto.confidence |> Option.map string
+                  dto.sensitive |> Option.map string
+                  dto.memory_need
+                  dto.tool_need
+                  dto.memory_mutation |> Option.map string
+                  dto.conflict_likely |> Option.map string ]
+                |> List.exists Option.isSome
 
             if not hasAnyHint then
                 None
             else
-                let turnKind = tryJsonString root "turn_kind"
+                let turnKind = dto.turn_kind
 
                 let memoryAction =
-                    tryJsonString root "memory_action"
-                    |> Option.orElse (memoryActionFromLegacy root)
+                    dto.memory_action
+                    |> Option.orElse (memoryActionFromLegacy dto)
 
                 let needsExternalContext =
-                    tryJsonBoolOption root "needs_external_context"
-                    |> Option.orElse (needsExternalContextFromLegacy root)
+                    dto.needs_external_context
+                    |> Option.orElse (needsExternalContextFromLegacy dto)
 
-                let sensitive = tryJsonBool root "sensitive"
+                let sensitive = dto.sensitive |> Option.defaultValue false
 
                 let memoryMutation =
-                    tryJsonBool root "memory_mutation" || isMemoryMutationAction memoryAction
+                    (dto.memory_mutation |> Option.defaultValue false)
+                    || isMemoryMutationAction memoryAction
 
                 let conflictLikely =
-                    tryJsonBool root "conflict_likely" || isCorrectionTurn turnKind memoryAction
+                    (dto.conflict_likely |> Option.defaultValue false)
+                    || isCorrectionTurn turnKind memoryAction
 
                 Some
                     { turnKind = turnKind
-                      topicContinuity = tryJsonString root "topic_continuity"
+                      topicContinuity = dto.topic_continuity
                       memoryAction = memoryAction
                       needsExternalContext = needsExternalContext
-                      confidence = tryJsonFloat root "confidence" |> Option.defaultValue 0.5
+                      confidence = dto.confidence |> Option.defaultValue 0.5
                       riskFlags =
                         { memoryMutation = memoryMutation
                           sensitive = sensitive
                           conflictLikely = conflictLikely } }
-        with _ ->
-            None
 
     let private dispatchToolCall (st: VoiceState) (fc: ContentFunctionCall) =
         let question = toolQuestion fc.arguments

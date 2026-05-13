@@ -4,6 +4,7 @@ open System
 open System.Collections.Generic
 open System.Diagnostics
 open System.Text.Json
+open System.Text.Json.Serialization
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.Extensions.AI
@@ -77,6 +78,16 @@ type private PlannedToolCall =
       query: string
       maxResults: int
       arguments: IReadOnlyDictionary<string, string> }
+
+type private PlannedToolCallDto =
+    { plugin: string option
+      tool: string option
+      ``function``: string option
+      query: string option
+      max_results: int option
+      arguments: Map<string, string> option }
+
+type private ToolPlanDto = { calls: PlannedToolCallDto list option }
 
 type QaSession(options: QaSessionOptions) =
     let mutable contextProviders = options.contextProviders
@@ -330,26 +341,17 @@ type QaSession(options: QaSessionOptions) =
                         arguments = makeArgs [ "query", question; "max_results", string options.memoryCandidateChunks ] }
               | None -> () ]
 
-    let tryJsonString (name: string) (element: JsonElement) =
-        let mutable prop = Unchecked.defaultof<JsonElement>
+    let jsonOptions =
+        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+        options.NumberHandling <- JsonNumberHandling.AllowReadingFromString
+        options.Converters.Add(JsonFSharpConverter())
+        options
 
-        if element.ValueKind = JsonValueKind.Object && element.TryGetProperty(name, &prop) then
-            match prop.ValueKind with
-            | JsonValueKind.String -> prop.GetString() |> Option.ofObj |> Option.bind Text.notEmpty
-            | JsonValueKind.Number -> Some(prop.GetRawText())
-            | JsonValueKind.True -> Some "true"
-            | JsonValueKind.False -> Some "false"
-            | _ -> None
-        else
+    let tryDeserializeToolPlan (text: string) =
+        try
+            JsonSerializer.Deserialize<ToolPlanDto>(text, jsonOptions) |> Some
+        with _ ->
             None
-
-    let tryJsonInt name fallback element =
-        tryJsonString name element
-        |> Option.bind (fun value ->
-            match Int32.TryParse value with
-            | true, parsed -> Some parsed
-            | false, _ -> None)
-        |> Option.defaultValue fallback
 
     let toolPlanPrompt question (catalog: QaToolCatalog) =
         let systemPrompt =
@@ -364,7 +366,7 @@ type QaSession(options: QaSessionOptions) =
         [ ChatMessage(ChatRole.System, systemPrompt)
           ChatMessage(ChatRole.User, userPrompt) ]
 
-    let parseToolPlan (catalog: QaToolCatalog) (text: string) =
+    let parseToolPlan (catalog: QaToolCatalog) (text: string) : PlannedToolCall list =
         try
             let first = text.IndexOf('{')
             let last = text.LastIndexOf('}')
@@ -375,19 +377,12 @@ type QaSession(options: QaSessionOptions) =
                 else
                     text
 
-            use doc = JsonDocument.Parse(json)
-            let mutable calls = Unchecked.defaultof<JsonElement>
-
-            if
-                doc.RootElement.TryGetProperty("calls", &calls)
-                && calls.ValueKind = JsonValueKind.Array
-            then
-                calls.EnumerateArray()
+            match tryDeserializeToolPlan json |> Option.bind _.calls with
+            | Some calls ->
+                calls
                 |> Seq.choose (fun item ->
-                    let plugin = tryJsonString "plugin" item
-
-                    let toolName =
-                        tryJsonString "tool" item |> Option.orElse (tryJsonString "function" item)
+                    let plugin = item.plugin
+                    let toolName = item.tool |> Option.orElse item.``function``
 
                     match plugin, toolName with
                     | Some plugin, Some toolName ->
@@ -397,22 +392,12 @@ type QaSession(options: QaSessionOptions) =
                         with
                         | None -> None
                         | Some tool ->
-                            let query = tryJsonString "query" item |> Option.defaultValue ""
-                            let maxResults = tryJsonInt "max_results" 6 item |> clamp 30
+                            let query = item.query |> Option.defaultValue ""
+                            let maxResults = item.max_results |> Option.defaultValue 6 |> clamp 30
                             let args = Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
 
-                            match item.TryGetProperty("arguments", &calls) with
-                            | true when calls.ValueKind = JsonValueKind.Object ->
-                                for prop in calls.EnumerateObject() do
-                                    match prop.Value.ValueKind with
-                                    | JsonValueKind.String ->
-                                        args[prop.Name] <-
-                                            prop.Value.GetString() |> Option.ofObj |> Option.defaultValue ""
-                                    | JsonValueKind.Number
-                                    | JsonValueKind.True
-                                    | JsonValueKind.False -> args[prop.Name] <- prop.Value.GetRawText()
-                                    | _ -> ()
-                            | _ -> ()
+                            for KeyValue(name, value) in item.arguments |> Option.defaultValue Map.empty do
+                                args[name] <- value
 
                             if not (args.ContainsKey "query") && not (String.IsNullOrWhiteSpace query) then
                                 args["query"] <- query
@@ -424,19 +409,19 @@ type QaSession(options: QaSessionOptions) =
                                 args["max_results"] <- string maxResults
 
                             Some
-                                { tool = tool
-                                  query = query
-                                  maxResults = maxResults
-                                  arguments = args :> IReadOnlyDictionary<string, string> }
+                                ({ tool = tool
+                                   query = query
+                                   maxResults = maxResults
+                                   arguments = args :> IReadOnlyDictionary<string, string> }
+                                 : PlannedToolCall)
                     | _ -> None)
                 |> Seq.truncate 4
                 |> Seq.toList
-            else
-                []
+            | None -> []
         with _ ->
             []
 
-    let runToolPlanner (catalog: QaToolCatalog) question cancellationToken =
+    let runToolPlanner (catalog: QaToolCatalog) question cancellationToken : Async<PlannedToolCall list> =
         async {
             match options.enableToolPlanner, hasPlannerCandidateTools catalog, options.clients.toolPlanner with
             | false, _, _
@@ -469,7 +454,7 @@ type QaSession(options: QaSessionOptions) =
                   createdAt = DateTimeOffset.UtcNow }
         }
 
-    let invokeTools calls cancellationToken =
+    let invokeTools (calls: PlannedToolCall list) cancellationToken =
         async {
             let deduped =
                 calls

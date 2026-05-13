@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="FSharp.SystemTextJson" />
     <PackageReference Include="FsColbert" />
     <PackageReference Include="Microsoft.Extensions.AI" />
   </ItemGroup>

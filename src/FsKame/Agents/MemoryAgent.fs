@@ -2,6 +2,7 @@ namespace FsKame.WorkFlow
 
 open System
 open System.Text.Json
+open System.Text.Json.Serialization
 open System.Threading
 open FsKame
 open Microsoft.Extensions.AI
@@ -24,6 +25,60 @@ module MemoryAgent =
           selectedSourceMaxResults: int
           usedLlm: bool
           judgeNotes: string list }
+
+    type private PlannedToolCallDto =
+        { plugin: string option
+          plugin_name: string option
+          ``function``: string option
+          function_name: string option
+          query: string option
+          max_results: int option
+          maxResults: int option
+          reason: string option }
+
+    type private ControllerPlanDto =
+        { controller_path: string option
+          memory_mutation: bool option
+          sensitive: bool option
+          conflict_likely: bool option
+          query: string option
+          kinds: string list option
+          scopes: string list option
+          temporal_mode: string option
+          include_superseded: bool option
+          recall_budget: string option
+          max_candidates: int option
+          tool_calls: PlannedToolCallDto list option
+          selected_source_query: string option
+          selected_source_max_results: int option
+          reason: string option }
+
+    type private MemoryProposalDto =
+        { kind: string option
+          title: string option
+          text: string option
+          summary: string option
+          scope: string option
+          entities: string list option
+          tags: string list option
+          confidence: float option
+          importance: float option
+          sensitivity: string option
+          explicit_correction: bool option }
+
+    type private WritebackProposalsDto = { proposals: MemoryProposalDto list option }
+
+    let private jsonOptions =
+        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+        options.NumberHandling <- JsonNumberHandling.AllowReadingFromString
+        options.Converters.Add(JsonFSharpConverter())
+        options
+
+    let private tryDeserialize<'T> (text: string) =
+        try
+            JsonSerializer.Deserialize<'T>(text, jsonOptions) |> Some
+        with _ ->
+            None
 
     type State =
         { bus: WBus<FlowMsg, AgentMsg>
@@ -274,69 +329,6 @@ module MemoryAgent =
         else
             text
 
-    let private tryGetProperty (element: JsonElement) (name: string) =
-        let mutable prop = Unchecked.defaultof<JsonElement>
-
-        if element.ValueKind = JsonValueKind.Object && element.TryGetProperty(name, &prop) then
-            Some prop
-        else
-            None
-
-    let private stringProp name (element: JsonElement) =
-        tryGetProperty element name
-        |> Option.bind (fun prop ->
-            match prop.ValueKind with
-            | JsonValueKind.String -> prop.GetString() |> Option.ofObj |> Option.bind Text.notEmpty
-            | JsonValueKind.Number -> Some(prop.GetRawText())
-            | JsonValueKind.True -> Some "true"
-            | JsonValueKind.False -> Some "false"
-            | _ -> None)
-
-    let private boolProp name (element: JsonElement) =
-        stringProp name element
-        |> Option.bind (fun value ->
-            match value.Trim().ToLowerInvariant() with
-            | "true"
-            | "yes"
-            | "1" -> Some true
-            | "false"
-            | "no"
-            | "0" -> Some false
-            | _ -> None)
-
-    let private intProp name (element: JsonElement) =
-        stringProp name element
-        |> Option.bind (fun value ->
-            match Int32.TryParse value with
-            | true, parsed -> Some parsed
-            | false, _ -> None)
-
-    let private floatProp name (element: JsonElement) =
-        stringProp name element
-        |> Option.bind (fun value ->
-            match Double.TryParse value with
-            | true, parsed -> Some parsed
-            | false, _ -> None)
-
-    let private stringListProp name (element: JsonElement) =
-        tryGetProperty element name
-        |> Option.map (fun prop ->
-            match prop.ValueKind with
-            | JsonValueKind.Array ->
-                prop.EnumerateArray()
-                |> Seq.choose (fun value ->
-                    match value.ValueKind with
-                    | JsonValueKind.String -> value.GetString() |> Option.ofObj |> Option.bind Text.notEmpty
-                    | _ -> None)
-                |> Seq.toList
-            | JsonValueKind.String ->
-                prop.GetString()
-                |> Option.ofObj
-                |> Option.map Text.splitLines
-                |> Option.defaultValue []
-            | _ -> [])
-        |> Option.defaultValue []
-
     let private parseMemoryKind value =
         match
             value
@@ -452,12 +444,7 @@ module MemoryAgent =
         }
 
     let private tryParseJsonObject (text: string) =
-        try
-            let doc = JsonDocument.Parse(text)
-            let root = doc.RootElement.Clone()
-            Some root
-        with _ ->
-            None
+        tryDeserialize<ControllerPlanDto> text
 
     let private judgePrompt
         (prefix: string)
@@ -488,59 +475,60 @@ module MemoryAgent =
 
         $"{prefix}\n\nUser turn:\n{snapshot.text}\n\nRealtime judgement hints:\n{hints}\n\n{extra}"
 
-    let private parseRiskFlags fallback (root: JsonElement) =
-        { memoryMutation = boolProp "memory_mutation" root |> Option.defaultValue fallback.memoryMutation
-          sensitive = boolProp "sensitive" root |> Option.defaultValue fallback.sensitive
-          conflictLikely = boolProp "conflict_likely" root |> Option.defaultValue fallback.conflictLikely }
+    let private parseRiskFlags fallback (dto: ControllerPlanDto) =
+        { memoryMutation = dto.memory_mutation |> Option.defaultValue fallback.memoryMutation
+          sensitive = dto.sensitive |> Option.defaultValue fallback.sensitive
+          conflictLikely = dto.conflict_likely |> Option.defaultValue fallback.conflictLikely }
 
-    let private parseRecallSpec (fallback: RecallSpec) (root: JsonElement) =
+    let private parseRecallSpec (fallback: RecallSpec) (dto: ControllerPlanDto) =
         let budget =
-            parseRecallBudget (stringProp "recall_budget" root)
+            parseRecallBudget dto.recall_budget
             |> Option.defaultValue fallback.recallBudget
 
         let kinds =
-            stringListProp "kinds" root
+            dto.kinds
+            |> Option.defaultValue []
             |> List.choose (Some >> parseMemoryKind)
             |> fun kinds -> if List.isEmpty kinds then fallback.kinds else kinds
 
         let scopes =
-            stringListProp "scopes" root
+            dto.scopes
+            |> Option.defaultValue []
             |> List.choose (Some >> parseMemoryScope)
             |> fun scopes -> if List.isEmpty scopes then fallback.scopes else scopes
 
         { fallback with
             query =
-                stringProp "query" root
+                dto.query
                 |> Option.defaultValue fallback.query
                 |> Text.normalizeWhitespace
             kinds = kinds
             scopes = scopes
             temporalMode =
-                parseTemporalMode (stringProp "temporal_mode" root)
+                parseTemporalMode dto.temporal_mode
                 |> Option.defaultValue fallback.temporalMode
             includeSuperseded =
-                boolProp "include_superseded" root
+                dto.include_superseded
                 |> Option.defaultValue fallback.includeSuperseded
             recallBudget = budget
             maxCandidates =
-                intProp "max_candidates" root
+                dto.max_candidates
                 |> Option.defaultValue fallback.maxCandidates
                 |> clampCandidates budget
             latencyBudget = budgetLatency budget }
 
-    let private parseToolCalls availableTools (snapshot: TranscriptSnapshot) (root: JsonElement) =
-        tryGetProperty root "tool_calls"
-        |> Option.filter (fun prop -> prop.ValueKind = JsonValueKind.Array)
-        |> Option.map (fun prop ->
-            prop.EnumerateArray()
+    let private parseToolCalls availableTools (snapshot: TranscriptSnapshot) (dto: ControllerPlanDto) =
+        dto.tool_calls
+        |> Option.map (fun calls ->
+            calls
             |> Seq.choose (fun item ->
                 let pluginName =
-                    stringProp "plugin" item
-                    |> Option.orElse (stringProp "plugin_name" item)
+                    item.plugin
+                    |> Option.orElse item.plugin_name
                     |> Option.defaultValue "FsKameTools"
 
                 let functionName =
-                    stringProp "function" item |> Option.orElse (stringProp "function_name" item)
+                    item.``function`` |> Option.orElse item.function_name
 
                 match functionName with
                 | None -> None
@@ -552,15 +540,15 @@ module MemoryAgent =
                             { pluginName = pluginName
                               functionName = functionName
                               query =
-                                stringProp "query" item
+                                item.query
                                 |> Option.defaultValue snapshot.text
                                 |> Text.normalizeWhitespace
                               maxResults =
-                                intProp "max_results" item
-                                |> Option.orElse (intProp "maxResults" item)
+                                item.max_results
+                                |> Option.orElse item.maxResults
                                 |> Option.defaultValue C.REALTIME_MEMORY_CANDIDATE_CHUNKS
                                 |> fun value -> max 1 (min 30 value)
-                              reason = stringProp "reason" item |> Option.defaultValue "LLM-planned tool call." }
+                              reason = item.reason |> Option.defaultValue "LLM-planned tool call." }
                     else
                         None)
             |> Seq.distinctBy (fun call -> call.pluginName, call.functionName, call.query)
@@ -568,11 +556,11 @@ module MemoryAgent =
             |> Seq.toList)
         |> Option.defaultValue []
 
-    let private parseToolPlan availableTools (snapshot: TranscriptSnapshot) (root: JsonElement) =
-        let toolCalls = parseToolCalls availableTools snapshot root
+    let private parseToolPlan availableTools (snapshot: TranscriptSnapshot) (dto: ControllerPlanDto) =
+        let toolCalls = parseToolCalls availableTools snapshot dto
 
         let selectedSourceQuery =
-            stringProp "selected_source_query" root
+            dto.selected_source_query
             |> Option.orElse (
                 toolCalls
                 |> List.tryFind (fun call -> call.functionName = "selected_source_search")
@@ -580,7 +568,7 @@ module MemoryAgent =
             )
 
         let selectedSourceMaxResults =
-            intProp "selected_source_max_results" root
+            dto.selected_source_max_results
             |> Option.defaultValue C.REALTIME_MEMORY_CANDIDATE_CHUNKS
             |> fun value -> max 1 (min C.REALTIME_MEMORY_CANDIDATE_CHUNKS value)
 
@@ -590,22 +578,22 @@ module MemoryAgent =
         (fallback: MemoryTurnPlan)
         availableTools
         (snapshot: TranscriptSnapshot)
-        (root: JsonElement)
+        (dto: ControllerPlanDto)
         =
-        let riskFlags = parseRiskFlags fallback.decision.riskFlags root
+        let riskFlags = parseRiskFlags fallback.decision.riskFlags dto
 
         let decision =
             { fallback.decision with
                 controllerPath =
-                    parseControllerPath (stringProp "controller_path" root)
+                    parseControllerPath dto.controller_path
                     |> Option.defaultValue fallback.decision.controllerPath
-                recallSpec = parseRecallSpec fallback.decision.recallSpec root
+                recallSpec = parseRecallSpec fallback.decision.recallSpec dto
                 riskFlags = riskFlags
                 acceptedRealtimeJudgement = false
-                reason = stringProp "reason" root |> Option.defaultValue fallback.decision.reason }
+                reason = dto.reason |> Option.defaultValue fallback.decision.reason }
 
         let toolCalls, selectedSourceQuery, selectedSourceMaxResults =
-            parseToolPlan availableTools snapshot root
+            parseToolPlan availableTools snapshot dto
 
         { decision = decision
           toolCalls = toolCalls
@@ -614,7 +602,7 @@ module MemoryAgent =
           usedLlm = true
           judgeNotes = [ decision.reason ] }
 
-    let private tryRunJudge name (work: Async<JsonElement option>) =
+    let private tryRunJudge name (work: Async<ControllerPlanDto option>) =
         async {
             try
                 let! value = work
@@ -738,27 +726,27 @@ Use current_time for time/date. Use source_inventory for document inventory ques
         ||> Array.fold (fun (plan, notes) result ->
             match result with
             | None -> plan, notes
-            | Some(name, root) ->
+            | Some(name, dto) ->
                 match name with
                 | "classification" ->
-                    let riskFlags = parseRiskFlags plan.decision.riskFlags root
+                    let riskFlags = parseRiskFlags plan.decision.riskFlags dto
 
                     let decision =
                         { plan.decision with
                             controllerPath =
-                                parseControllerPath (stringProp "controller_path" root)
+                                parseControllerPath dto.controller_path
                                 |> Option.defaultValue plan.decision.controllerPath
                             riskFlags = riskFlags
                             acceptedRealtimeJudgement = false
-                            reason = stringProp "reason" root |> Option.defaultValue plan.decision.reason }
+                            reason = dto.reason |> Option.defaultValue plan.decision.reason }
 
                     { plan with
                         decision = decision
                         usedLlm = true },
                     notes @ [ $"classification: {decision.reason}" ]
                 | "recall" ->
-                    let recallSpec = parseRecallSpec plan.decision.recallSpec root
-                    let reason = stringProp "reason" root |> Option.defaultValue "LLM recall judge."
+                    let recallSpec = parseRecallSpec plan.decision.recallSpec dto
+                    let reason = dto.reason |> Option.defaultValue "LLM recall judge."
 
                     { plan with
                         decision =
@@ -769,9 +757,9 @@ Use current_time for time/date. Use source_inventory for document inventory ques
                     notes @ [ $"recall: {reason}" ]
                 | "tools" ->
                     let toolCalls, selectedSourceQuery, selectedSourceMaxResults =
-                        parseToolPlan availableTools snapshot root
+                        parseToolPlan availableTools snapshot dto
 
-                    let reason = stringProp "reason" root |> Option.defaultValue "LLM tool judge."
+                    let reason = dto.reason |> Option.defaultValue "LLM tool judge."
 
                     { plan with
                         toolCalls = toolCalls
@@ -1395,19 +1383,19 @@ Use this only to adjudicate corrections, memory mutations, sensitive turns, ambi
                 |> st.toolHostContext.Blackboard.Enqueue
             | None -> ()
 
-    let private proposalFromJson (snapshot: TranscriptSnapshot) (item: JsonElement) =
-        match parseMemoryKind (stringProp "kind" item), stringProp "text" item with
+    let private proposalFromJson (snapshot: TranscriptSnapshot) (item: MemoryProposalDto) =
+        match parseMemoryKind item.kind, item.text with
         | Some kind, Some text ->
             let scope =
-                parseMemoryScope (stringProp "scope" item) |> Option.defaultValue Session
+                parseMemoryScope item.scope |> Option.defaultValue Session
 
             let sensitivity =
-                parseSensitivity (stringProp "sensitivity" item) |> Option.defaultValue Normal
+                parseSensitivity item.sensitivity |> Option.defaultValue Normal
 
-            let title = stringProp "title" item |> Option.defaultValue (Text.truncate 72 text)
+            let title = item.title |> Option.defaultValue (Text.truncate 72 text)
 
             let summary =
-                stringProp "summary" item |> Option.defaultValue (Text.truncate 180 text)
+                item.summary |> Option.defaultValue (Text.truncate 180 text)
 
             Some
                 { kind = kind
@@ -1416,10 +1404,10 @@ Use this only to adjudicate corrections, memory mutations, sensitive turns, ambi
                   summary = Text.normalizeWhitespace summary
                   scope = scope
                   namespaceId = DurableMemory.defaultNamespace
-                  entities = stringListProp "entities" item
-                  tags = stringListProp "tags" item
-                  confidence = floatProp "confidence" item |> Option.defaultValue 0.75
-                  importance = floatProp "importance" item |> Option.defaultValue 0.5
+                  entities = item.entities |> Option.defaultValue []
+                  tags = item.tags |> Option.defaultValue []
+                  confidence = item.confidence |> Option.defaultValue 0.75
+                  importance = item.importance |> Option.defaultValue 0.5
                   sensitivity = sensitivity
                   provenance =
                     { sourceType = "memory_controller"
@@ -1428,14 +1416,13 @@ Use this only to adjudicate corrections, memory mutations, sensitive turns, ambi
                       toolArgsHash = None
                       resultHash = None }
                   observedAt = snapshot.receivedAt
-                  explicitCorrection = boolProp "explicit_correction" item |> Option.defaultValue false }
+                  explicitCorrection = item.explicit_correction |> Option.defaultValue false }
         | _ -> None
 
-    let private parseWritebackProposals (snapshot: TranscriptSnapshot) (root: JsonElement) =
-        tryGetProperty root "proposals"
-        |> Option.filter (fun prop -> prop.ValueKind = JsonValueKind.Array)
-        |> Option.map (fun prop ->
-            prop.EnumerateArray()
+    let private parseWritebackProposals (snapshot: TranscriptSnapshot) (dto: WritebackProposalsDto) =
+        dto.proposals
+        |> Option.map (fun proposals ->
+            proposals
             |> Seq.choose (proposalFromJson snapshot)
             |> Seq.truncate 6
             |> Seq.toList)
@@ -1500,7 +1487,7 @@ Write only durable, future-useful facts. Use directive for preferences/instructi
                             "You are FsKame's memory writeback controller. Propose typed durable memory writes; do not answer the user."
                             (writebackPrompt snapshot answer)
 
-                    return tryParseJsonObject json |> Option.map (parseWritebackProposals snapshot)
+                    return tryDeserialize<WritebackProposalsDto> json |> Option.map (parseWritebackProposals snapshot)
                 with _ ->
                     return None
         }

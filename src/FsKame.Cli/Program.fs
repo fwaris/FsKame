@@ -7,6 +7,7 @@ open System.IO
 open System.IO.Compression
 open System.Net.Http
 open System.Text.Json
+open System.Text.Json.Serialization
 open System.Text.RegularExpressions
 open System.Threading
 open System.Threading.Tasks
@@ -29,15 +30,30 @@ module Program =
         { keywords: string list
           questions: string list }
 
+    type private JudgeVerdict =
+        { verdict: string option
+          score: float option
+          reason: string option }
+
     let jsonOptions =
         let opts = JsonSerializerOptions(WriteIndented = true)
         opts.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+        opts.NumberHandling <- JsonNumberHandling.AllowReadingFromString
+        opts.Converters.Add(JsonFSharpConverter())
         opts
 
     let jsonLineOptions =
         let opts = JsonSerializerOptions()
         opts.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+        opts.NumberHandling <- JsonNumberHandling.AllowReadingFromString
+        opts.Converters.Add(JsonFSharpConverter())
         opts
+
+    let private tryDeserialize<'T> (text: string) =
+        try
+            JsonSerializer.Deserialize<'T>(text, jsonOptions) |> Some
+        with _ ->
+            None
 
     let usage =
         """
@@ -492,24 +508,13 @@ Common options:
                         else
                             text
 
-                    use doc = JsonDocument.Parse(json)
-
-                    let mutable prop = Unchecked.defaultof<JsonElement>
+                    let parsed = tryDeserialize<JudgeVerdict> json
 
                     let verdict =
-                        if doc.RootElement.TryGetProperty("verdict", &prop) then
-                            prop.GetString()
-                        else
-                            "unknown"
+                        parsed |> Option.bind _.verdict |> Option.defaultValue "unknown"
 
                     let score =
-                        if
-                            doc.RootElement.TryGetProperty("score", &prop)
-                            && prop.ValueKind = JsonValueKind.Number
-                        then
-                            prop.GetDouble()
-                        else
-                            0.0
+                        parsed |> Option.bind _.score |> Option.defaultValue 0.0
 
                     return Some(verdict, score)
                 with _ ->
@@ -646,44 +651,9 @@ Common options:
           terms = terms
           logs = logs }
 
-    let private tryReadIntProperty (name: string) (root: JsonElement) =
-        let mutable prop = Unchecked.defaultof<JsonElement>
-
-        if root.TryGetProperty(name, &prop) then
-            match prop.ValueKind with
-            | JsonValueKind.Number ->
-                match prop.TryGetInt32() with
-                | true, value -> Some value
-                | _ -> None
-            | JsonValueKind.String ->
-                prop.GetString()
-                |> Option.ofObj
-                |> Option.bind (fun value ->
-                    match Int32.TryParse value with
-                    | true, parsed -> Some parsed
-                    | false, _ -> None)
-            | _ -> None
-        else
-            None
-
-    let private tryReadStringListProperty (name: string) (root: JsonElement) =
-        let mutable prop = Unchecked.defaultof<JsonElement>
-
-        if root.TryGetProperty(name, &prop) then
-            match prop.ValueKind with
-            | JsonValueKind.Array ->
-                prop.EnumerateArray()
-                |> Seq.choose (fun value ->
-                    if value.ValueKind = JsonValueKind.String then
-                        value.GetString() |> Text.notEmpty
-                    else
-                        None)
-                |> Seq.toList
-                |> Some
-            | JsonValueKind.String -> prop.GetString() |> Option.ofObj |> Option.map (splitValues [| ','; ';'; '|' |])
-            | _ -> None
-        else
-            None
+    type private ReplayExpansionRecord =
+        { index: int option
+          expansionLogs: string list option }
 
     let private loadReplayExpansions (path: string) =
         if String.IsNullOrWhiteSpace path || not (File.Exists path) then
@@ -694,15 +664,11 @@ Common options:
                 if String.IsNullOrWhiteSpace line then
                     None
                 else
-                    try
-                        use doc = JsonDocument.Parse line
-                        let root = doc.RootElement
-
-                        match tryReadIntProperty "index" root, tryReadStringListProperty "expansionLogs" root with
+                    tryDeserialize<ReplayExpansionRecord> line
+                    |> Option.bind (fun record ->
+                        match record.index, record.expansionLogs with
                         | Some index, Some logs -> Some(index, parseExpansionLog logs)
-                        | _ -> None
-                    with _ ->
-                        None)
+                        | _ -> None))
             |> Map.ofSeq
 
     type IndexElaboration =
@@ -767,39 +733,17 @@ Common options:
                 || details.Contains("structured output")
                 || details.Contains("schema")))
 
-    let private tryReadIndexElaboration (root: JsonElement) =
-        match tryReadIntProperty "label" root with
-        | None -> None
-        | Some label ->
-            let keywords = tryReadStringListProperty "keywords" root |> Option.defaultValue []
-
-            let questions = tryReadStringListProperty "questions" root |> Option.defaultValue []
-
-            Some(
-                { label = label
-                  keywords = keywords
-                  questions = questions }
-                |> sanitizeIndexElaboration
-            )
-
     let private parseIndexElaborationJson (text: string) =
         let tryParseJson (value: string) =
-            try
-                use doc = JsonDocument.Parse value
-                let root = doc.RootElement
-
-                match root.ValueKind with
-                | JsonValueKind.Array -> root.EnumerateArray() |> Seq.choose tryReadIndexElaboration |> Seq.toList
-                | JsonValueKind.Object ->
-                    let mutable items = Unchecked.defaultof<JsonElement>
-
-                    if root.TryGetProperty("items", &items) && items.ValueKind = JsonValueKind.Array then
-                        items.EnumerateArray() |> Seq.choose tryReadIndexElaboration |> Seq.toList
-                    else
-                        tryReadIndexElaboration root |> Option.toList
-                | _ -> []
-            with _ ->
-                []
+            tryDeserialize<IndexElaboration list> value
+            |> Option.orElseWith (fun () ->
+                tryDeserialize<IndexElaborationBatch> value
+                |> Option.map _.items)
+            |> Option.orElseWith (fun () ->
+                tryDeserialize<IndexElaboration> value
+                |> Option.map List.singleton)
+            |> Option.defaultValue []
+            |> List.map sanitizeIndexElaboration
 
         let trimmed = text.Trim()
         let parsed = tryParseJson trimmed
@@ -824,13 +768,9 @@ Common options:
                 if String.IsNullOrWhiteSpace line then
                     None
                 else
-                    try
-                        use doc = JsonDocument.Parse line
-
-                        tryReadIndexElaboration doc.RootElement
-                        |> Option.map (fun item -> item.label, item)
-                    with _ ->
-                        None)
+                    tryDeserialize<IndexElaboration> line
+                    |> Option.map sanitizeIndexElaboration
+                    |> Option.map (fun item -> item.label, item))
             |> Map.ofSeq
 
     let private promptAnswerText (answer: string) =

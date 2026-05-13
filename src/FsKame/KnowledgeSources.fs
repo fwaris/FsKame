@@ -142,7 +142,7 @@ module KnowledgeSources =
             let! index, errors =
                 sources
                 |> List.map toQaSource
-                |> FsKame.QA.KnowledgeSources.loadIndex FileSystem.AppDataDirectory report keywordOptions true
+                |> FsKame.QA.KnowledgeSources.loadIndex FileSystem.AppDataDirectory report keywordOptions false
 
             return fromQaIndex index, errors
         }
