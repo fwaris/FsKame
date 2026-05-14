@@ -93,8 +93,10 @@ module DoclingHybrid =
                         let renderOptions =
                             RenderOptions(Dpi = max 36 options.rasterDpi, WithAnnotations = true, WithFormFill = true)
 
+                        let pdfBytes = File.ReadAllBytes path
+
                         let pages: DoclingRasterPage list =
-                            Conversion.ToImages(path, "", renderOptions)
+                            Conversion.ToImages(pdfBytes, "", renderOptions)
                             |> Seq.mapi (fun index bitmap ->
                                 use bitmap = bitmap
 
