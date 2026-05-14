@@ -15,7 +15,8 @@ module QaAgent =
         { logExpansions: bool
           logChunks: bool
           useLexicalFilter: bool
-          elaborateIndexKeywords: bool }
+          elaborateIndexKeywords: bool
+          useHybridPdfParsing: bool }
 
     type State =
         { bus: WBus<FlowMsg, AgentMsg>
@@ -47,6 +48,12 @@ module QaAgent =
         { FsKame.QA.KnowledgeSource.kind = kind
           location = source.location
           enabled = source.enabled }
+
+    let private pdfParsingMode flags =
+        if flags.useHybridPdfParsing then
+            FsKame.QA.KnowledgeSources.PdfParsingMode.Hybrid
+        else
+            FsKame.QA.KnowledgeSources.PdfParsingMode.Legacy
 
     let private toWorkflowSource (source: FsKame.QA.KnowledgeSource) : KnowledgeSource =
         let kind =
@@ -114,6 +121,7 @@ module QaAgent =
                 answerModelId = answerModel.modelId
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
+                pdfParsingMode = pdfParsingMode flags
                 enableToolPlanner = st.useCase.runtime.enableToolPlanner
                 enableQueryExpansion = st.useCase.runtime.enableQueryExpansion
                 memoryCandidateChunks = st.useCase.runtime.memoryCandidateChunks
@@ -142,6 +150,7 @@ module QaAgent =
                 useCaseFingerprint = FsKame.QA.UseCaseDefinition.fingerprint st.useCase
                 keywordModelId = keywordModel.modelId
                 elaborateIndexKeywords = flags.elaborateIndexKeywords
+                pdfParsingMode = pdfParsingMode flags
                 buildMissingIndexes = false
                 logExpansions = flags.logExpansions
                 logChunks = flags.logChunks
@@ -172,9 +181,11 @@ module QaAgent =
             for err in errors do
                 st.bus.PostToAgent(Ag_Log err)
 
+            let parserName = if flags.useHybridPdfParsing then "hybrid" else "legacy"
+
             st.bus.PostToAgent(
                 Ag_Log
-                    $"QA session configured: mode={FsKame.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords}."
+                    $"QA session configured: mode={FsKame.RetrievalModes.displayName mode}; sources={sources.Length}; retrievalFlags=lexical:{flags.useLexicalFilter} indexKeywords:{flags.elaborateIndexKeywords} pdfParser:{parserName}."
             )
 
             return session
@@ -269,7 +280,8 @@ module QaAgent =
                     { logExpansions = flags.logExpansions
                       logChunks = flags.logChunks
                       useLexicalFilter = flags.useLexicalFilter
-                      elaborateIndexKeywords = flags.elaborateIndexKeywords }
+                      elaborateIndexKeywords = flags.elaborateIndexKeywords
+                      useHybridPdfParsing = flags.useHybridPdfParsing }
 
                 if st.session.IsSome && sameSourceConfiguration st mode sources flags then
                     st.bus.PostToAgent(
@@ -310,7 +322,8 @@ module QaAgent =
             { logExpansions = flags.logExpansions
               logChunks = flags.logChunks
               useLexicalFilter = flags.useLexicalFilter
-              elaborateIndexKeywords = flags.elaborateIndexKeywords }
+              elaborateIndexKeywords = flags.elaborateIndexKeywords
+              useHybridPdfParsing = flags.useHybridPdfParsing }
 
         let st0 =
             { bus = bus

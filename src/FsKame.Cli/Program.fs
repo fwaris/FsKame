@@ -510,11 +510,9 @@ Common options:
 
                     let parsed = tryDeserialize<JudgeVerdict> json
 
-                    let verdict =
-                        parsed |> Option.bind _.verdict |> Option.defaultValue "unknown"
+                    let verdict = parsed |> Option.bind _.verdict |> Option.defaultValue "unknown"
 
-                    let score =
-                        parsed |> Option.bind _.score |> Option.defaultValue 0.0
+                    let score = parsed |> Option.bind _.score |> Option.defaultValue 0.0
 
                     return Some(verdict, score)
                 with _ ->
@@ -586,7 +584,14 @@ Common options:
                             modelId = optionValue "small-model" QaDefaults.nanoModel parsed
                             useCaseProfile = profile }
 
-                    return! KnowledgeSources.loadIndex (storageRoot parsed) report keywordOptions true [ source ]
+                    return!
+                        KnowledgeSources.loadIndex
+                            (storageRoot parsed)
+                            report
+                            keywordOptions
+                            KnowledgeSources.PdfParsingMode.Hybrid
+                            true
+                            [ source ]
         }
 
     type ReplayExpansion =
@@ -736,12 +741,8 @@ Common options:
     let private parseIndexElaborationJson (text: string) =
         let tryParseJson (value: string) =
             tryDeserialize<IndexElaboration list> value
-            |> Option.orElseWith (fun () ->
-                tryDeserialize<IndexElaborationBatch> value
-                |> Option.map _.items)
-            |> Option.orElseWith (fun () ->
-                tryDeserialize<IndexElaboration> value
-                |> Option.map List.singleton)
+            |> Option.orElseWith (fun () -> tryDeserialize<IndexElaborationBatch> value |> Option.map _.items)
+            |> Option.orElseWith (fun () -> tryDeserialize<IndexElaboration> value |> Option.map List.singleton)
             |> Option.defaultValue []
             |> List.map sanitizeIndexElaboration
 

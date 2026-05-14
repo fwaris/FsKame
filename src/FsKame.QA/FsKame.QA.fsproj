@@ -11,6 +11,7 @@
     <Compile Include="UseCases.fs" />
     <Compile Include="Text.fs" />
     <Compile Include="MemoryTypes.fs" />
+    <Compile Include="DoclingHybrid.fs" />
     <Compile Include="KnowledgeSources.fs" />
     <Compile Include="ContextProviders.fs" />
     <Compile Include="DurableMemory.fs" />
@@ -28,6 +29,10 @@
     <PackageReference Include="FSharp.SystemTextJson" />
     <PackageReference Include="FsColbert" />
     <PackageReference Include="Microsoft.Extensions.AI" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Include="PDFtoImage" PrivateAssets="all" />
+    <PackageReference Include="RapidOCR.Net" />
+    <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 
 </Project>

@@ -74,6 +74,7 @@ module KnowledgeSources =
         match kind with
         | PdfFile -> Pdf
         | MarkdownFile -> Markdown
+        | JsonFile -> Json
 
     let fromPdfDocuments (docs: PdfDocumentSource list) =
         docs
@@ -132,17 +133,37 @@ module KnowledgeSources =
                     client = None
                     modelId = C.NANO_MODEL }
 
-    let InindexSource report keywordOptions (source: KnowledgeSource) =
+    let private pdfParsingMode useHybridPdfParsing =
+        if useHybridPdfParsing then
+            FsKame.QA.KnowledgeSources.PdfParsingMode.Hybrid
+        else
+            FsKame.QA.KnowledgeSources.PdfParsingMode.Legacy
+
+    let InindexSource report keywordOptions useHybridPdfParsing (source: KnowledgeSource) =
         source
         |> toQaSource
-        |> FsKame.QA.KnowledgeSources.InindexSource FileSystem.AppDataDirectory report keywordOptions
+        |> FsKame.QA.KnowledgeSources.InindexSource
+            FileSystem.AppDataDirectory
+            report
+            keywordOptions
+            (pdfParsingMode useHybridPdfParsing)
 
-    let loadIndex report (keywordOptions: KeywordGenerationOptions) (sources: KnowledgeSource list) =
+    let loadIndex
+        report
+        (keywordOptions: KeywordGenerationOptions)
+        useHybridPdfParsing
+        (sources: KnowledgeSource list)
+        =
         async {
             let! index, errors =
                 sources
                 |> List.map toQaSource
-                |> FsKame.QA.KnowledgeSources.loadIndex FileSystem.AppDataDirectory report keywordOptions false
+                |> FsKame.QA.KnowledgeSources.loadIndex
+                    FileSystem.AppDataDirectory
+                    report
+                    keywordOptions
+                    (pdfParsingMode useHybridPdfParsing)
+                    false
 
             return fromQaIndex index, errors
         }

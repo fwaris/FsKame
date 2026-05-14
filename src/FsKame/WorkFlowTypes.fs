@@ -265,7 +265,8 @@ type AgentMsg =
         {| logExpansions: bool
            logChunks: bool
            useLexicalFilter: bool
-           elaborateIndexKeywords: bool |}
+           elaborateIndexKeywords: bool
+           useHybridPdfParsing: bool |}
     | Ag_TranscriptUpdated of TranscriptSnapshot
     | Ag_MemoryRequested of MemoryRequest
     | Ag_MemoryReady of MemoryRequest * MemoryContext

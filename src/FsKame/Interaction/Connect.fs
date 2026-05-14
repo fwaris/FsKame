@@ -40,6 +40,7 @@ module Connect =
                                 parms.logChunks
                                 parms.useLexicalFilter
                                 parms.elaborateIndexKeywords
+                                parms.useHybridPdfParsing
 
                         flow.PostToFlow Fl_Start
 

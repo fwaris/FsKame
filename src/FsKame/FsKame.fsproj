@@ -123,6 +123,7 @@
 
   <ItemGroup Condition="$(TargetPlatformIdentifier) == 'maccatalyst'">
     <None Include="$(MacCatalystProjectFolder)Info.plist" LogicalName="Info.plist" />
+    <Compile Include="$(MacCatalystProjectFolder)PdfKitRasterizer.fs" />
     <Compile Include="$(MacCatalystProjectFolder)AppDelegate.fs" />
     <Compile Include="$(MacCatalystProjectFolder)Program.fs" />
   </ItemGroup>
@@ -155,10 +156,13 @@
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Extensions" />
+    <PackageReference Include="PDFtoImage" Condition="'$(TargetFramework)' != 'net10.0-maccatalyst'" />
+    <PackageReference Include="RapidOCR.Net" />
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />
     <PackageReference Include="FsColbert" />
     <PackageReference Include="RTFlow" />
+    <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 
   <ItemGroup>

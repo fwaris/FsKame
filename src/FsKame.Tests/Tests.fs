@@ -175,6 +175,38 @@ type FakeContextProvider(source: KnowledgeSource) =
 
         member _.DisposeAsync() = ValueTask()
 
+type FakeDoclingRasterizer(result: Result<FsColbert.DoclingRasterPage list, string>) =
+    interface FsColbert.IDoclingPageRasterizer with
+        member _.RasterizeAsync _ = async { return result }
+
+type CountingDoclingOcr(cells: FsColbert.DoclingOcrCell list) =
+    let mutable calls = 0
+
+    member _.Calls = calls
+
+    interface FsColbert.IDoclingOcrProvider with
+        member _.RecognizeAsync _ =
+            async {
+                calls <- calls + 1
+                return Ok cells
+            }
+
+type FakeDoclingLayout(predictions: FsColbert.DoclingLayoutPrediction list) =
+    interface FsColbert.IDoclingLayoutPredictor with
+        member _.PredictLayoutAsync pages =
+            async {
+                let requested = pages |> List.map _.pageNo |> Set.ofList
+
+                return
+                    predictions
+                    |> List.filter (fun prediction -> Set.contains prediction.pageNo requested)
+                    |> Ok
+            }
+
+type FakeDoclingFigureClassifier(classes: FsColbert.DoclingFigureClass list) =
+    interface FsColbert.IDoclingFigureClassifier with
+        member _.ClassifyAsync _ = async { return Ok classes }
+
 let private keywordPassage (source: KnowledgeSource) index text : FsColbert.PassageRef =
     { sourceId = source.location
       sourceDisplayName = source.DisplayName
@@ -217,6 +249,23 @@ let private testSourceFingerprint (source: KnowledgeSource) =
             source.location
 
     $"{testSourceKindId source.kind}:{filePart}"
+
+let private doclingNativeCell text l bottom r top : FsColbert.DoclingOcrCell =
+    { text = text
+      bbox = FsColbert.DoclingGeometry.bottomLeftBox l bottom r top
+      confidence = None }
+
+let private doclingOcrCell text l t r b : FsColbert.DoclingOcrCell =
+    { text = text
+      bbox = FsColbert.DoclingGeometry.topLeftBox l t r b
+      confidence = Some 0.9 }
+
+let private doclingCluster id label l t r b : FsColbert.DoclingLayoutCluster =
+    { id = id
+      label = label
+      confidence = 0.95f
+      bbox = FsColbert.DoclingGeometry.topLeftBox l t r b
+      cells = [] }
 
 let private testKeywordCachePath storageRoot sourceFingerprint (options: KnowledgeSources.KeywordGenerationOptions) =
     let folder = Path.Combine(storageRoot, "FsKame", "FsColbert", "KeywordCache")
@@ -273,6 +322,42 @@ let private seedKeywordCache
         )
 
     File.AppendAllText(cachePath, line + Environment.NewLine, Encoding.UTF8)
+
+let private fakeEmbedding () : FsColbert.MultiVector =
+    let dim = FsColbert.EncoderConfig.mxbaiEdgeColbert.embeddingDim
+    let values = Array.zeroCreate<float32> dim
+    values[0] <- 1.0f
+
+    { tokenIds = [| 1 |]
+      vectors = values
+      tokenCount = 1
+      embeddingDim = dim }
+
+let private fakeIndexedPassage (source: KnowledgeSource) index text keywords : FsColbert.IndexedPassage =
+    let reference: FsColbert.PassageRef =
+        { sourceId = source.location
+          sourceDisplayName = source.DisplayName
+          sourceLocation = source.location
+          index = index
+          text = text
+          keywords = keywords }
+
+    { reference = reference
+      embedding = fakeEmbedding ()
+      terms = Set.empty }
+
+let private fakeColbertIndex passages : FsColbert.ColbertIndex =
+    { config = FsColbert.EncoderConfig.mxbaiEdgeColbert
+      chunkOptions = FsColbert.ChunkOptions.fsKameDefaults
+      tfidfOptions = FsColbert.TfidfOptions.defaults
+      passages = passages
+      tfidf = FsColbert.Tfidf.buildWithOptions FsColbert.TfidfOptions.defaults passages
+      createdAt = DateTimeOffset.UtcNow }
+
+let private prebuiltFolder storageRoot =
+    let folder = Path.Combine(storageRoot, "FsKame", "FsColbert", "Prebuilt")
+    Directory.CreateDirectory folder |> ignore
+    folder
 
 [<Theory>]
 [<InlineData("gpt-5.5")>]
@@ -429,6 +514,316 @@ let ``json knowledge source can be loaded as generic QA content`` () =
         Assert.Contains("emergency dental appointments", chunk.text)
     }
     |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling json knowledge source loads passages with keywords`` () =
+    async {
+        let path =
+            Path.Combine(Path.GetTempPath(), $"fskame-docling-source-{Guid.NewGuid():N}.json")
+
+        let page: FsColbert.DoclingPageItem =
+            { pageNo = 1
+              size = { width = 100.0; height = 100.0 } }
+
+        let item: FsColbert.DoclingTextItem =
+            { selfRef = "#/texts/0"
+              parent = "#/body"
+              label = FsColbert.DoclingLabels.ofJsonValue "text"
+              text = "Orthodontia benefits require a waiting period."
+              orig = "Orthodontia benefits require a waiting period."
+              contentLayer = FsColbert.DoclingContentLayer.Body
+              prov = []
+              keywords = [ "dental braces"; "orthodontia" ]
+              sourceId = Some "benefits"
+              sourceDisplayName = Some "Benefits" }
+
+        let document: FsColbert.DoclingDocument =
+            { name = "benefits"
+              originFileName = Some "benefits.pdf"
+              originMimeType = Some "application/pdf"
+              pages = [ 1, page ] |> Map.ofList
+              texts = [ item ]
+              tables = []
+              pictures = []
+              bodyChildren = [ "#/texts/0" ]
+              furnitureChildren = [] }
+
+        File.WriteAllText(path, FsColbert.DoclingJson.serialize document)
+
+        let source =
+            { kind = Json
+              location = path
+              enabled = true }
+
+        let! passages = KnowledgeSources.loadPassages source
+
+        match passages with
+        | Error err -> failwith err
+        | Ok passages ->
+            let passage = Assert.Single passages
+            Assert.Contains("Orthodontia benefits", passage.text)
+            Assert.Equal<string list>([ "dental braces"; "orthodontia" ], passage.keywords)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid page input builder skips ocr when native pdf text is sufficient`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 200.0; height = 200.0 }
+                      cells =
+                        [ doclingNativeCell "Native" 10.0 145.0 60.0 160.0
+                          doclingNativeCell "PDF" 65.0 145.0 95.0 160.0
+                          doclingNativeCell "text" 100.0 145.0 135.0 160.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let ocr = CountingDoclingOcr [ doclingOcrCell "OCR fallback" 20.0 80.0 120.0 100.0 ]
+
+        let! result =
+            DoclingHybrid.buildPageInputs
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                "/tmp/native.pdf"
+                rasterizer
+                nativeProvider
+                (Some(ocr :> FsColbert.IDoclingOcrProvider))
+
+        match result with
+        | Error err -> failwith err
+        | Ok inputs ->
+            let input = Assert.Single inputs
+            Assert.Equal(0, ocr.Calls)
+            Assert.Equal<string list>([ "Native"; "PDF"; "text" ], input.ocrCells |> List.map _.text)
+            Assert.Equal(FsColbert.DoclingCoordinateOrigin.BottomLeft, input.ocrCells.Head.bbox.coordOrigin)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid provider path emits native text table picture metadata and keywords`` () =
+    async {
+        let image = FsColbert.DoclingRgbImage.solid 400 400 255uy 255uy 255uy
+        let rasterizer = FakeDoclingRasterizer(Ok [ { pageNo = 1; image = image } ])
+
+        let nativeProvider _ =
+            async {
+                let nativePage: FsColbert.DoclingNativePageText =
+                    { pageNo = 1
+                      size = { width = 400.0; height = 400.0 }
+                      cells =
+                        [ doclingNativeCell "Native paragraph" 20.0 285.0 180.0 310.0
+                          doclingNativeCell "Table row" 30.0 155.0 120.0 175.0 ] }
+
+                return Ok [ nativePage ]
+            }
+
+        let layout =
+            FakeDoclingLayout
+                [ { pageNo = 1
+                    clusters =
+                      [ doclingCluster 0 FsColbert.DoclingLabel.Text 15.0 80.0 220.0 130.0
+                        doclingCluster 1 FsColbert.DoclingLabel.Table 20.0 210.0 160.0 260.0
+                        doclingCluster 2 FsColbert.DoclingLabel.Picture 250.0 190.0 360.0 300.0 ] } ]
+            :> FsColbert.IDoclingLayoutPredictor
+
+        let classifier =
+            let figureClass: FsColbert.DoclingFigureClass =
+                { className = "diagram"
+                  confidence = 0.91f }
+
+            FakeDoclingFigureClassifier [ figureClass ] :> FsColbert.IDoclingFigureClassifier
+
+        let passageSource =
+            FsColbert.PassageSource.create "/tmp/doc.pdf" "Doc" "/tmp/doc.pdf"
+
+        let! result =
+            DoclingHybrid.readPdfPassagesWithProviders
+                { DoclingHybrid.defaults with
+                    minNativeCharsPerPage = 8 }
+                FsColbert.ChunkOptions.fsKameDefaults
+                passageSource
+                "/tmp/doc.pdf"
+                rasterizer
+                nativeProvider
+                None
+                layout
+                (Some classifier)
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            let passage = Assert.Single passages
+            Assert.Contains("Native paragraph", passage.text)
+            Assert.Contains("Table row", passage.text)
+            Assert.Contains("[Picture: diagram", passage.text)
+            Assert.Contains("table", passage.keywords)
+            Assert.Contains("picture", passage.keywords)
+            Assert.Contains("diagram", passage.keywords)
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``docling hybrid fallback uses legacy pdf reader when provider path fails`` () =
+    async {
+        let source =
+            FsColbert.PassageSource.create "fallback" "Fallback" "/tmp/fallback.pdf"
+
+        let reports = ResizeArray<string>()
+
+        let legacyReader () =
+            async {
+                let passage: FsColbert.PassageRef =
+                    { sourceId = source.id
+                      sourceDisplayName = source.displayName
+                      sourceLocation = source.location
+                      index = 0
+                      text = "Legacy PdfPig text"
+                      keywords = [] }
+
+                return Ok [ passage ]
+            }
+
+        let! result =
+            DoclingHybrid.fallbackToLegacy
+                reports.Add
+                source.location
+                (async { return Error "layout model missing" })
+                legacyReader
+
+        match result with
+        | Error err -> failwith err
+        | Ok passages ->
+            let passage = Assert.Single passages
+            Assert.Equal("Legacy PdfPig text", passage.text)
+            Assert.Contains(reports, fun message -> message.Contains("Falling back to PdfPig text extraction"))
+    }
+    |> Async.RunSynchronously
+
+[<Fact>]
+let ``legacy prebuilt manifest still loads persisted index keywords`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "legacy.md")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "Legacy markdown source.")
+
+    let source =
+        { kind = Markdown
+          location = sourcePath
+          enabled = true }
+
+    let folder = prebuiltFolder storageRoot
+    let indexPath = Path.Combine(folder, "legacy.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage source 0 "Policy waiting period text." [ "orthodontia" ] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    let manifest =
+        [| {| id = "legacy"
+              kind = "markdown"
+              displayName = "Legacy"
+              storedPath = sourcePath
+              indexPath = indexPath |} |]
+
+    File.WriteAllText(Path.Combine(folder, "prebuilt-indexes.installed.json"), JsonSerializer.Serialize manifest)
+
+    match KnowledgeSources.tryLoadPrebuiltIndex storageRoot source with
+    | Error err -> failwith err
+    | Ok None -> failwith "Expected prebuilt index."
+    | Ok(Some index) ->
+        Assert.Equal(1, index.passages.Length)
+        Assert.Equal<string list>([ "orthodontia" ], index.passages.Head.reference.keywords)
+
+[<Fact>]
+let ``bundle manifest loads prebuilt index and keeps keyword tfidf ranking`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "docling.json")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "{}")
+
+    let source =
+        { kind = Json
+          location = sourcePath
+          enabled = true }
+
+    let folder = prebuiltFolder storageRoot
+    let indexPath = Path.Combine(folder, "docling.fsci")
+
+    fakeColbertIndex
+        [ fakeIndexedPassage source 0 "Benefits waiting period details." [ "orthodontia"; "dental braces" ]
+          fakeIndexedPassage source 1 "Kitchen recipe notes." [] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    let bundleSource: FsColbert.IndexBundleSource =
+        { sourceId = sourcePath
+          sourceDisplayName = "Docling"
+          sourceLocation = Some sourcePath
+          sourceKind = Some "docling-json"
+          indexFile = "docling.fsci" }
+
+    FsColbert.IndexBundle.create
+        "test-bundle"
+        "1.0.0"
+        FsColbert.ModelCatalog.mxbaiEdgeColbertInt8.id
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        [ bundleSource ]
+    |> FsColbert.IndexBundle.writeManifest (Path.Combine(folder, "index-bundle.json"))
+
+    match KnowledgeSources.tryLoadPrebuiltIndex storageRoot source with
+    | Error err -> failwith err
+    | Ok None -> failwith "Expected bundled index."
+    | Ok(Some index) ->
+        let keywordCount =
+            index.passages |> List.sumBy (fun passage -> passage.reference.keywords.Length)
+
+        let candidates =
+            FsColbert.Tfidf.scoreQuery index.tfidf "orthodontia"
+            |> FsColbert.Tfidf.topCandidates 10
+
+        Assert.True(keywordCount > 0)
+        Assert.Equal(0, candidates[0] |> fst)
+
+[<Fact>]
+let ``bundle manifest mismatch reports compatibility reason`` () =
+    let storageRoot = tempStorageRoot ()
+    let sourcePath = Path.Combine(storageRoot, "docling.json")
+    Directory.CreateDirectory storageRoot |> ignore
+    File.WriteAllText(sourcePath, "{}")
+
+    let source =
+        { kind = Json
+          location = sourcePath
+          enabled = true }
+
+    let folder = prebuiltFolder storageRoot
+    let indexPath = Path.Combine(folder, "docling.fsci")
+
+    fakeColbertIndex [ fakeIndexedPassage source 0 "Benefits waiting period details." [ "orthodontia" ] ]
+    |> FsColbert.IndexPersistence.save indexPath
+
+    FsColbert.IndexBundle.create
+        "test-bundle"
+        "1.0.0"
+        "wrong/model"
+        FsColbert.ChunkOptions.fsKameDefaults
+        FsColbert.TfidfOptions.defaults
+        [ { sourceId = sourcePath
+            sourceDisplayName = "Docling"
+            sourceLocation = Some sourcePath
+            sourceKind = Some "docling-json"
+            indexFile = "docling.fsci" } ]
+    |> FsColbert.IndexBundle.writeManifest (Path.Combine(folder, "index-bundle.json"))
+
+    match KnowledgeSources.tryLoadPrebuiltIndex storageRoot source with
+    | Ok _ -> failwith "Expected incompatible bundle."
+    | Error err -> Assert.Contains("model_id", err)
 
 [<Fact>]
 let ``qa session composes injected context providers`` () =

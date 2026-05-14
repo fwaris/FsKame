@@ -24,7 +24,8 @@ type StartParams =
       logExpansions: bool
       logChunks: bool
       useLexicalFilter: bool
-      elaborateIndexKeywords: bool }
+      elaborateIndexKeywords: bool
+      useHybridPdfParsing: bool }
 
 and Model =
     { currentPage: AppPage
@@ -45,7 +46,8 @@ and Model =
       logExpansions: bool
       logChunks: bool
       useLexicalFilter: bool
-      elaborateIndexKeywords: bool }
+      elaborateIndexKeywords: bool
+      useHybridPdfParsing: bool }
 
 and Msg =
     | OpenAiKeyChanged of string
@@ -76,4 +78,5 @@ and Msg =
     | LogChunksToggled of bool
     | UseLexicalFilterToggled of bool
     | ElaborateIndexKeywordsToggled of bool
+    | UseHybridPdfParsingToggled of bool
     | PrebuiltDocumentsInstalled of Result<PdfDocumentSource list * string list, exn>

@@ -72,6 +72,7 @@ module Update =
         Settings.setLogChunks model.logChunks
         Settings.setUseCaseUseLexicalFilter model.activeUseCase.id model.useLexicalFilter
         Settings.setUseCaseElaborateIndexKeywords model.activeUseCase.id model.elaborateIndexKeywords
+        Settings.setUseHybridPdfParsing model.useHybridPdfParsing
 
         model.useCaseSettings
         |> Map.iter (fun key value -> Settings.setUseCaseSetting model.activeUseCase.id key value)
@@ -133,7 +134,8 @@ module Update =
                 {| logExpansions = model.logExpansions
                    logChunks = model.logChunks
                    useLexicalFilter = model.useLexicalFilter
-                   elaborateIndexKeywords = model.elaborateIndexKeywords |}
+                   elaborateIndexKeywords = model.elaborateIndexKeywords
+                   useHybridPdfParsing = model.useHybridPdfParsing |}
 
             bundle.flow.PostToAgent(Ag_SourcesUpdated(model.retrievalMode, sources model, flags))
         | None -> ()
@@ -154,10 +156,10 @@ module Update =
                 return Error ex
         }
 
-    let private processDocuments report keywordOptions (docs: PdfDocumentSource list) =
+    let private processDocuments report keywordOptions useHybridPdfParsing (docs: PdfDocumentSource list) =
         async {
             try
-                let! results = PdfLibrary.processDocuments report keywordOptions docs
+                let! results = PdfLibrary.processDocuments report keywordOptions useHybridPdfParsing docs
                 return Ok results
             with ex ->
                 return Error ex
@@ -246,7 +248,8 @@ module Update =
           logExpansions = model.logExpansions
           logChunks = model.logChunks
           useLexicalFilter = model.useLexicalFilter
-          elaborateIndexKeywords = model.elaborateIndexKeywords }
+          elaborateIndexKeywords = model.elaborateIndexKeywords
+          useHybridPdfParsing = model.useHybridPdfParsing }
 
     let init () =
         let docs = Settings.pdfLibrary ()
@@ -292,7 +295,8 @@ module Update =
           elaborateIndexKeywords =
             Settings.useCaseElaborateIndexKeywords
                 loadedUseCase.definition.id
-                loadedUseCase.definition.runtime.elaborateIndexKeywords },
+                loadedUseCase.definition.runtime.elaborateIndexKeywords
+          useHybridPdfParsing = Settings.useHybridPdfParsing () },
         Cmd.OfAsync.either installPrebuiltDocuments docs PrebuiltDocumentsInstalled EventError
 
     let update msg model =
@@ -380,6 +384,26 @@ module Update =
                 saveSettings model
                 postSources model
                 model, Cmd.none
+        | UseHybridPdfParsingToggled value ->
+            match sourceConfigBlocked model "Changing PDF parser" with
+            | Some msg ->
+                { model with
+                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | None ->
+                let parserName = if value then "Hybrid" else "Legacy"
+
+                let model =
+                    { model with
+                        useHybridPdfParsing = value
+                        log =
+                            $"PDF parser set to {parserName}. Reprocess documents to rebuild indexes with this parser."
+                            :: model.log
+                            |> List.truncate C.MAX_LOG }
+
+                saveSettings model
+                postSources model
+                model, Cmd.none
         | PrebuiltDocumentsInstalled(Ok(docs, logs)) ->
             let model =
                 { model with
@@ -455,7 +479,7 @@ module Update =
 
                 model,
                 Cmd.OfAsync.either
-                    (processDocuments report (keywordOptions model))
+                    (processDocuments report (keywordOptions model) model.useHybridPdfParsing)
                     docs
                     PdfProcessingCompleted
                     EventError
@@ -561,7 +585,7 @@ module Update =
 
                     model,
                     Cmd.OfAsync.either
-                        (processDocuments report (keywordOptions model))
+                        (processDocuments report (keywordOptions model) model.useHybridPdfParsing)
                         retry
                         PdfProcessingCompleted
                         EventError

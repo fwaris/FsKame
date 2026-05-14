@@ -17,6 +17,7 @@ type FsColbertContextProviderOptions =
       useCaseFingerprint: string
       keywordModelId: string
       elaborateIndexKeywords: bool
+      pdfParsingMode: KnowledgeSources.PdfParsingMode
       buildMissingIndexes: bool
       logExpansions: bool
       logChunks: bool
@@ -36,6 +37,7 @@ module FsColbertContextProviderOptions =
           useCaseFingerprint = ""
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
+          pdfParsingMode = KnowledgeSources.PdfParsingMode.Hybrid
           buildMissingIndexes = true
           logExpansions = false
           logChunks = false
@@ -77,6 +79,7 @@ type FsColbertContextProvider(options: FsColbertContextProviderOptions) =
                             options.storageRoot
                             options.report
                             keywordOptions
+                            options.pdfParsingMode
                             options.buildMissingIndexes
                             sources
 

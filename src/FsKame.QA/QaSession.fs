@@ -32,6 +32,7 @@ type QaSessionOptions =
       answerModelId: string
       keywordModelId: string
       elaborateIndexKeywords: bool
+      pdfParsingMode: KnowledgeSources.PdfParsingMode
       memoryCandidateChunks: int
       maxContextChunks: int
       memoryService: IMemoryService option
@@ -59,6 +60,7 @@ module QaSessionOptions =
           answerModelId = QaDefaults.answerModel
           keywordModelId = QaDefaults.nanoModel
           elaborateIndexKeywords = true
+          pdfParsingMode = KnowledgeSources.PdfParsingMode.Hybrid
           memoryCandidateChunks = QaDefaults.memoryCandidateChunks
           maxContextChunks = QaDefaults.maxContextChunks
           memoryService = None
@@ -87,7 +89,8 @@ type private PlannedToolCallDto =
       max_results: int option
       arguments: Map<string, string> option }
 
-type private ToolPlanDto = { calls: PlannedToolCallDto list option }
+type private ToolPlanDto =
+    { calls: PlannedToolCallDto list option }
 
 type QaSession(options: QaSessionOptions) =
     let mutable contextProviders = options.contextProviders
@@ -408,12 +411,13 @@ type QaSession(options: QaSessionOptions) =
                             if not (args.ContainsKey "max_results") then
                                 args["max_results"] <- string maxResults
 
-                            Some
-                                ({ tool = tool
-                                   query = query
-                                   maxResults = maxResults
-                                   arguments = args :> IReadOnlyDictionary<string, string> }
-                                 : PlannedToolCall)
+                            Some(
+                                { tool = tool
+                                  query = query
+                                  maxResults = maxResults
+                                  arguments = args :> IReadOnlyDictionary<string, string> }
+                                : PlannedToolCall
+                            )
                     | _ -> None)
                 |> Seq.truncate 4
                 |> Seq.toList
@@ -626,6 +630,7 @@ type QaSession(options: QaSessionOptions) =
                         |> UseCaseDefinition.fingerprint
                     keywordModelId = options.keywordModelId
                     elaborateIndexKeywords = options.elaborateIndexKeywords
+                    pdfParsingMode = options.pdfParsingMode
                     logExpansions = options.logExpansions
                     logChunks = options.logChunks
                     useLexicalFilter = options.useLexicalFilter

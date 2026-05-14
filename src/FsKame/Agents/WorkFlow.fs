@@ -19,7 +19,8 @@ module StateMachine =
           logExpansions: bool
           logChunks: bool
           useLexicalFilter: bool
-          elaborateIndexKeywords: bool }
+          elaborateIndexKeywords: bool
+          useHybridPdfParsing: bool }
 
     let private startAgents ss =
         async {
@@ -29,7 +30,8 @@ module StateMachine =
                 { logExpansions = ss.logExpansions
                   logChunks = ss.logChunks
                   useLexicalFilter = ss.useLexicalFilter
-                  elaborateIndexKeywords = ss.elaborateIndexKeywords }
+                  elaborateIndexKeywords = ss.elaborateIndexKeywords
+                  useHybridPdfParsing = ss.useHybridPdfParsing }
 
             QaAgent.start
                 ss.apiKey
@@ -66,7 +68,8 @@ module StateMachine =
                     {| logExpansions = ss.logExpansions
                        logChunks = ss.logChunks
                        useLexicalFilter = ss.useLexicalFilter
-                       elaborateIndexKeywords = ss.elaborateIndexKeywords |}
+                       elaborateIndexKeywords = ss.elaborateIndexKeywords
+                       useHybridPdfParsing = ss.useHybridPdfParsing |}
 
                 return F(s_run ss, [ Ag_SourcesUpdated(ss.retrievalMode, ss.sources, flags) ])
             | W_Msg(Fl_Terminate x) -> return terminate x.abnormal ss
@@ -95,6 +98,7 @@ module StateMachine =
         logChunks
         useLexicalFilter
         elaborateIndexKeywords
+        useHybridPdfParsing
         =
         let bus = WBus<FlowMsg, AgentMsg>.Create()
 
@@ -111,7 +115,8 @@ module StateMachine =
               logExpansions = logExpansions
               logChunks = logChunks
               useLexicalFilter = useLexicalFilter
-              elaborateIndexKeywords = elaborateIndexKeywords }
+              elaborateIndexKeywords = elaborateIndexKeywords
+              useHybridPdfParsing = useHybridPdfParsing }
 
         RTFlow.Workflow.run CancellationToken.None bus (s_start ss)
 

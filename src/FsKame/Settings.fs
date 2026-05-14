@@ -35,16 +35,20 @@ module Settings =
         match kind with
         | PdfFile -> "pdf"
         | MarkdownFile -> "markdown"
+        | JsonFile -> "json"
 
     let private kindFromString value =
         match (defaultArg (Option.ofObj value) "").Trim().ToLowerInvariant() with
         | "markdown"
         | "md" -> MarkdownFile
+        | "json"
+        | "docling-json" -> JsonFile
         | _ -> PdfFile
 
     let private kindFromFileName (fileName: string) =
         match Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant() with
         | "pdf" -> PdfFile
+        | "json" -> JsonFile
         | _ -> MarkdownFile
 
     let private statusToString (status: PdfProcessingStatus) =
@@ -340,6 +344,12 @@ module Settings =
     let setUseCaseElaborateIndexKeywords useCaseId value =
         Preferences.Default.Set(useCaseScopedKey useCaseId "Runtime.ElaborateIndexKeywords", value)
         setElaborateIndexKeywords value
+
+    let useHybridPdfParsing () =
+        Preferences.Default.Get(C.SETTINGS_USE_HYBRID_PDF_PARSING, true)
+
+    let setUseHybridPdfParsing value =
+        Preferences.Default.Set(C.SETTINGS_USE_HYBRID_PDF_PARSING, value)
 
     let useCaseSetting useCaseId key fallback =
         getScopedString useCaseId $"Settings.{key}" None fallback

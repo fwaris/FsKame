@@ -51,7 +51,7 @@ module SettingsView =
     let private settingsForm model =
         let canEditSettings = canEditSettings model
         let roles = FsKame.QA.ModelRole.all
-        let baseRows = 7 + roles.Length
+        let baseRows = 8 + roles.Length
         let facetRows = model.activeUseCase.settingsFacets.Length
 
         let rowDefinitions =
@@ -149,8 +149,22 @@ module SettingsView =
                 .gridColumn(1)
                 .centerVertical ()
 
+            ViewControls.formLabel "PDF Parser" (runtimeRow + 5)
+
+            (HStack(spacing = 8.) {
+                Switch(model.useHybridPdfParsing, UseHybridPdfParsingToggled)
+                    .isEnabled(canEditSettings)
+                    .centerVertical ()
+
+                Label(if model.useHybridPdfParsing then "Hybrid" else "Legacy").font(size = 13.).centerVertical ()
+            })
+                .gridRow(runtimeRow + 5)
+                .gridColumn(1)
+                .gridColumnSpan(2)
+                .margin (2.)
+
             for row, field in model.activeUseCase.settingsFacets |> List.indexed do
-                let row = runtimeRow + 5 + row
+                let row = runtimeRow + 6 + row
 
                 ViewControls.formLabel field.label row
 

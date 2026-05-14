@@ -3,6 +3,7 @@ namespace FsKame
 type DocumentKind =
     | PdfFile
     | MarkdownFile
+    | JsonFile
 
 type PdfProcessingStatus =
     | Queued
@@ -68,6 +69,7 @@ module PdfDocuments =
         match doc.kind with
         | PdfFile -> "PDF"
         | MarkdownFile -> "Markdown"
+        | JsonFile -> "JSON"
 
     let isReady doc =
         match doc.status with
