@@ -13,12 +13,9 @@ module StateMachine =
           useCase: FsKame.QA.UseCaseDefinition
           useCasePlugin: FsKame.QA.IUseCasePlugin
           useCaseSettings: Map<string, string>
-          oracleModel: string
           retrievalMode: RetrievalMode
           conn: RTOpenAI.Api.Connection
           sources: KnowledgeSource list
-          toolHostContext: ToolHostContext
-          toolCatalog: ToolCatalog
           logExpansions: bool
           logChunks: bool
           useLexicalFilter: bool
@@ -91,12 +88,9 @@ module StateMachine =
         useCase
         useCasePlugin
         useCaseSettings
-        oracleModel
         retrievalMode
         conn
         sources
-        toolHostContext
-        toolCatalog
         logExpansions
         logChunks
         useLexicalFilter
@@ -111,12 +105,9 @@ module StateMachine =
               useCase = useCase
               useCasePlugin = useCasePlugin
               useCaseSettings = useCaseSettings
-              oracleModel = oracleModel
               retrievalMode = retrievalMode
               conn = conn
               sources = sources
-              toolHostContext = toolHostContext
-              toolCatalog = toolCatalog
               logExpansions = logExpansions
               logChunks = logChunks
               useLexicalFilter = useLexicalFilter

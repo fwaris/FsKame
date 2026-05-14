@@ -18,15 +18,13 @@ type StartParams =
       useCase: FsKame.QA.UseCaseDefinition
       useCasePlugin: FsKame.QA.IUseCasePlugin
       useCaseSettings: Map<string, string>
-      oracleModel: string
       retrievalMode: RetrievalMode
       sources: KnowledgeSource list
       mailbox: Channel<Msg>
       logExpansions: bool
       logChunks: bool
       useLexicalFilter: bool
-      elaborateIndexKeywords: bool
-      toolCatalog: ToolCatalog }
+      elaborateIndexKeywords: bool }
 
 and Model =
     { currentPage: AppPage
@@ -38,7 +36,6 @@ and Model =
       useCasePlugin: FsKame.QA.IUseCasePlugin
       useCaseSettings: Map<string, string>
       modelRoleOverrides: Map<FsKame.QA.ModelRole, string>
-      oracleModel: string
       retrievalMode: RetrievalMode
       pdfDocuments: PdfDocumentSource list
       log: string list
@@ -52,7 +49,6 @@ and Model =
 
 and Msg =
     | OpenAiKeyChanged of string
-    | OracleModelChanged of string
     | ModelRoleModelChanged of FsKame.QA.ModelRole * string
     | UseCaseSettingChanged of string * string
     | RetrievalModeChanged of RetrievalMode

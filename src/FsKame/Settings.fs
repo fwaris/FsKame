@@ -213,10 +213,7 @@ module Settings =
         Preferences.Default.Set(C.SETTINGS_PDF_LIBRARY, json)
         tryWritePdfLibraryFile json
 
-    let oracleModel () =
-        Preferences.Default.Get(C.SETTINGS_ORACLE_MODEL, C.DEFAULT_ORACLE_MODEL).Trim()
-
-    let setOracleModel (value: string) =
+    let private setOracleModel (value: string) =
         let value =
             match Text.notEmpty value with
             | Some v -> v

@@ -67,13 +67,9 @@
     <Compile Include="Audio.fs" />
     <Compile Include="KnowledgeSources.fs" />
     <Compile Include="DurableMemory.fs" />
-    <Compile Include="Tooling.fs" />
     <Compile Include="UseCases.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="PdfLibrary.fs" />
-    <Compile Include="Agents\SourceAgent.fs" />
-    <Compile Include="Agents\MemoryAgent.fs" />
-    <Compile Include="Agents\OracleAgent.fs" />
     <Compile Include="Agents\AsyncPriorityQueue.fs" />
     <Compile Include="Agents\VoiceAgent.fs" />
     <Compile Include="Agents\AppAgent.fs" />
@@ -147,7 +143,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FsKame.QA\FsKame.QA.fsproj" />
-    <ProjectReference Include="..\FsKame.Tools\FsKame.Tools.fsproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -159,13 +154,11 @@
     <PackageReference Include="FSharp.SystemTextJson" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
-    <PackageReference Include="Microsoft.SemanticKernel" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Extensions" />
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />
     <PackageReference Include="FsColbert" />
     <PackageReference Include="RTFlow" />
-    <PackageReference Include="System.Text.Json" />
   </ItemGroup>
 
   <ItemGroup>

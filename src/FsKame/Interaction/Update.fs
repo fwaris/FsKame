@@ -240,15 +240,13 @@ module Update =
           useCase = useCase
           useCasePlugin = model.useCasePlugin
           useCaseSettings = model.useCaseSettings
-          oracleModel = model.oracleModel
           retrievalMode = model.retrievalMode
           sources = sources model
           mailbox = model.mailbox
           logExpansions = model.logExpansions
           logChunks = model.logChunks
           useLexicalFilter = model.useLexicalFilter
-          elaborateIndexKeywords = model.elaborateIndexKeywords
-          toolCatalog = ToolCatalog.empty }
+          elaborateIndexKeywords = model.elaborateIndexKeywords }
 
     let init () =
         let docs = Settings.pdfLibrary ()
@@ -259,11 +257,6 @@ module Update =
         Settings.setActiveUseCaseId loadedUseCase.definition.id
 
         let modelRoleOverrides = useCaseModelRoleOverrides loadedUseCase.definition
-
-        let answerModel =
-            modelRoleOverrides
-            |> Map.tryFind FsKame.QA.Answer
-            |> Option.defaultValue (FsKame.QA.UseCaseDefinition.model FsKame.QA.Answer loadedUseCase.definition).modelId
 
         let retrievalMode =
             loadedUseCase.definition.runtime.retrievalMode
@@ -284,7 +277,6 @@ module Update =
           useCasePlugin = loadedUseCase.plugin
           useCaseSettings = Settings.useCaseSettings loadedUseCase.definition.id loadedUseCase.definition.settingsFacets
           modelRoleOverrides = modelRoleOverrides
-          oracleModel = answerModel
           retrievalMode = retrievalMode
           pdfDocuments = docs
           log = initialLog
@@ -312,17 +304,6 @@ module Update =
                     log = msg :: model.log |> List.truncate C.MAX_LOG },
                 Cmd.none
             | None -> { model with openAiKey = value }, Cmd.none
-        | OracleModelChanged value ->
-            match sourceConfigBlocked model "Changing oracle model" with
-            | Some msg ->
-                { model with
-                    log = msg :: model.log |> List.truncate C.MAX_LOG },
-                Cmd.none
-            | None ->
-                { model with
-                    oracleModel = value
-                    modelRoleOverrides = model.modelRoleOverrides |> Map.add FsKame.QA.Answer value },
-                Cmd.none
         | ModelRoleModelChanged(role, value) ->
             match sourceConfigBlocked model $"Changing {FsKame.QA.ModelRole.storageName role} model" with
             | Some msg ->
@@ -332,11 +313,8 @@ module Update =
             | None ->
                 let modelRoleOverrides = model.modelRoleOverrides |> Map.add role value
 
-                let oracleModel = if role = FsKame.QA.Answer then value else model.oracleModel
-
                 { model with
-                    modelRoleOverrides = modelRoleOverrides
-                    oracleModel = oracleModel },
+                    modelRoleOverrides = modelRoleOverrides },
                 Cmd.none
         | UseCaseSettingChanged(key, value) ->
             match sourceConfigBlocked model $"Changing {key}" with

@@ -2,26 +2,24 @@ sequenceDiagram
     participant User
     participant Voice as VoiceAgent<br/>gpt-realtime-2
     participant Bus as AgentBus
-    participant Source as SourceAgent
-    participant Oracle as OracleAgent
-    participant LLM as Oracle model<br/>Responses API
+    participant QA as QaAgent
+    participant Tools as QA tools/context providers
+    participant LLM as Answer model<br/>Responses API
     participant App as AppAgent/UI
 
     User->>Voice: Speaks a question
     Voice->>Voice: Realtime transcription<br/>server VAD waits for final turn
-    Voice->>Bus: Ag_TranscriptUpdated(final snapshot)
-    Bus-->>App: Log final transcript
-    Bus-->>Source: Final transcript
+    Voice->>Bus: Ag_MemoryRequested(snapshot)
+    Bus-->>App: Log tool call / transcript
 
-    Source->>Source: Rank loaded PDF/URL chunks<br/>against transcript terms
-    Source->>Bus: Ag_ContextReady(snapshot, top chunks)
-    Bus-->>App: Log matched sources
-    Bus-->>Oracle: Context + transcript
+    Bus-->>QA: Memory request
+    QA->>Tools: Retrieve source context<br/>invoke selected tools
+    Tools-->>QA: Context chunks + tool observations
 
-    Oracle->>LLM: Ask for concise answer<br/>using external context
-    LLM-->>Oracle: OracleCandidate answer
-    Oracle->>Bus: Ag_ResponseReady(snapshot, candidate)
-    Bus-->>App: Log oracle answer
+    QA->>LLM: Ask for concise answer<br/>using context, tools, and memory
+    LLM-->>QA: Answer
+    QA->>Bus: Ag_ContextReady + Ag_ResponseReady
+    Bus-->>App: Log matched context and answer
     Bus-->>Voice: Guided response ready
 
     Voice->>Voice: Build response.create instructions<br/>with oracle guidance + source note
