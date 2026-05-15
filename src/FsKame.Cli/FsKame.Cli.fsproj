@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FsKame.QA\FsKame.QA.fsproj" />
+    <ProjectReference Include="..\FsKame.PdfRasterization\FsKame.PdfRasterization.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

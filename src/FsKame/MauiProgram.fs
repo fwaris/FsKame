@@ -4,9 +4,12 @@ open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Logging
 open Microsoft.Maui.Hosting
 open Fabulous.Maui
+open FsKame.PdfRasterization
 
 type MauiProgram =
     static member CreateMauiApp() =
+        PdfRasterizer.register ()
+
         let builder =
             MauiApp
                 .CreateBuilder()

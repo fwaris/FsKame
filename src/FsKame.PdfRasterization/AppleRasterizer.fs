@@ -1,11 +1,12 @@
-namespace FsKame
+namespace FsKame.PdfRasterization
 
 open System
 open System.Runtime.InteropServices
 open CoreGraphics
 open FsColbert
+open FsKame.QA
 
-module PdfKitRasterizer =
+module PdfRasterizer =
     let private bgraToRgbImage width height (buffer: byte[]) =
         let pixels = Array.zeroCreate<byte> (width * height * 3)
 
@@ -19,7 +20,7 @@ module PdfKitRasterizer =
 
         DoclingRgbImage.create width height pixels
 
-    let private renderPage (options: FsKame.QA.DoclingHybridOptions) (page: CGPDFPage) =
+    let private renderPage (options: DoclingHybridOptions) (page: CGPDFPage) =
         let bounds = page.GetBoxRect(CGPDFBox.Crop)
         let scale = float (max 36 options.rasterDpi) / 72.0
         let width = max 1 (int (Math.Ceiling(double bounds.Width * scale)))
@@ -53,7 +54,7 @@ module PdfKitRasterizer =
         finally
             handle.Free()
 
-    type Rasterizer(options: FsKame.QA.DoclingHybridOptions) =
+    type private Rasterizer(options: DoclingHybridOptions) =
         interface IDoclingPageRasterizer with
             member _.RasterizeAsync path =
                 async {
@@ -101,8 +102,8 @@ module PdfKitRasterizer =
                 }
 
     let register () =
-        FsKame.QA.DoclingHybrid.setDefaultOptions
-            { FsKame.QA.DoclingHybrid.defaults with
-                enableLayoutAnalysis = false }
+        DoclingHybrid.setDefaultOptions
+            { DoclingHybrid.defaults with
+                enableLayoutAnalysis = true }
 
-        FsKame.QA.DoclingHybrid.setRasterizerFactory (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)
+        DoclingHybrid.setRasterizerFactory (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)

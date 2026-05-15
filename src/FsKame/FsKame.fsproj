@@ -118,21 +118,18 @@
     <AndroidResource Update="$(AndroidProjectFolder)Resources/raw/*" />
     <AndroidAsset Include="$(AndroidProjectFolder)Assets/**/*" Exclude="$(AndroidProjectFolder)Assets/**/.*/**" />
     <AndroidManifest Include="$(AndroidProjectFolder)AndroidManifest.xml" />
-    <Compile Include="$(AndroidProjectFolder)PdfRendererRasterizer.fs" />
     <Compile Include="$(AndroidProjectFolder)MainActivity.fs" />
     <Compile Include="$(AndroidProjectFolder)MainApplication.fs" />
   </ItemGroup>
 
   <ItemGroup Condition="$(TargetPlatformIdentifier) == 'ios'">
     <None Include="$(iOSProjectFolder)Info.plist" LogicalName="Info.plist" />
-    <Compile Include="$(MacCatalystProjectFolder)PdfKitRasterizer.fs" />
     <Compile Include="$(iOSProjectFolder)AppDelegate.fs" />
     <Compile Include="$(iOSProjectFolder)Program.fs" />
   </ItemGroup>
 
   <ItemGroup Condition="$(TargetPlatformIdentifier) == 'maccatalyst'">
     <None Include="$(MacCatalystProjectFolder)Info.plist" LogicalName="Info.plist" />
-    <Compile Include="$(MacCatalystProjectFolder)PdfKitRasterizer.fs" />
     <Compile Include="$(MacCatalystProjectFolder)AppDelegate.fs" />
     <Compile Include="$(MacCatalystProjectFolder)Program.fs" />
   </ItemGroup>
@@ -153,6 +150,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FsKame.QA\FsKame.QA.fsproj" />
+    <ProjectReference Include="..\FsKame.PdfRasterization\FsKame.PdfRasterization.fsproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -7,6 +7,4 @@ open Microsoft.Maui
 type MainApplication(handle, ownership) =
     inherit MauiApplication(handle, ownership)
 
-    override _.CreateMauiApp() =
-        PdfRendererRasterizer.register ()
-        MauiProgram.CreateMauiApp()
+    override _.CreateMauiApp() = MauiProgram.CreateMauiApp()

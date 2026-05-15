@@ -31,7 +31,6 @@
     <PackageReference Include="FsColbert" />
     <PackageReference Include="Microsoft.Extensions.AI" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" PrivateAssets="all" />
-    <PackageReference Include="PDFtoImage" PrivateAssets="all" />
     <PackageReference Include="RapidOCR.Net" PrivateAssets="all" />
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>

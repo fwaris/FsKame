@@ -1,12 +1,13 @@
-namespace FsKame
+namespace FsKame.PdfRasterization
 
 open System
 open Android.Graphics
 open Android.Graphics.Pdf
 open Android.OS
 open FsColbert
+open FsKame.QA
 
-module PdfRendererRasterizer =
+module PdfRasterizer =
     let private bitmapToRgbImage (bitmap: Bitmap) =
         let width = bitmap.Width
         let height = bitmap.Height
@@ -25,7 +26,7 @@ module PdfRendererRasterizer =
 
         DoclingRgbImage.create width height pixels
 
-    let private renderPage (options: FsKame.QA.DoclingHybridOptions) (pageNumber: int) (page: PdfRenderer.Page) =
+    let private renderPage (options: DoclingHybridOptions) (pageNumber: int) (page: PdfRenderer.Page) =
         let scale = float32 (max 36 options.rasterDpi) / 72.0f
         let width = max 1 (int (MathF.Ceiling(float32 page.Width * scale)))
         let height = max 1 (int (MathF.Ceiling(float32 page.Height * scale)))
@@ -40,7 +41,7 @@ module PdfRendererRasterizer =
         { pageNo = pageNumber
           image = bitmapToRgbImage bitmap }
 
-    type Rasterizer(options: FsKame.QA.DoclingHybridOptions) =
+    type private Rasterizer(options: DoclingHybridOptions) =
         interface IDoclingPageRasterizer with
             member _.RasterizeAsync path =
                 async {
@@ -65,8 +66,8 @@ module PdfRendererRasterizer =
                 }
 
     let register () =
-        FsKame.QA.DoclingHybrid.setDefaultOptions
-            { FsKame.QA.DoclingHybrid.defaults with
-                enableLayoutAnalysis = false }
+        DoclingHybrid.setDefaultOptions
+            { DoclingHybrid.defaults with
+                enableLayoutAnalysis = true }
 
-        FsKame.QA.DoclingHybrid.setRasterizerFactory (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)
+        DoclingHybrid.setRasterizerFactory (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)

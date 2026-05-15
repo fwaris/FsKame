@@ -11,6 +11,7 @@ open System.Text.Json.Serialization
 open System.Text.RegularExpressions
 open System.Threading
 open System.Threading.Tasks
+open FsKame.PdfRasterization
 open FsKame.QA
 open Microsoft.Extensions.AI
 
@@ -1617,6 +1618,8 @@ Answers:
 
     [<EntryPoint>]
     let main argv =
+        PdfRasterizer.register ()
+
         let parsed = parseArgs argv
 
         let task =

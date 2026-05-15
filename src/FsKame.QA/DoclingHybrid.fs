@@ -4,10 +4,10 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Net.Http
+open System.Security.Cryptography
 open Microsoft.ML.OnnxRuntime
 open Microsoft.ML.OnnxRuntime.Tensors
 open FsColbert
-open PDFtoImage
 open RapidOcrNet
 open SkiaSharp
 
@@ -67,19 +67,16 @@ module DoclingHybrid =
     let private doclingModelFolder storageRoot name =
         Path.Combine(fsColbertRoot storageRoot, "Models", name)
 
-    let private doclingLayoutHeronFloat32Onnx =
-        let revision = "ff99ff93d6b0185279bc00ad60f688ca1ac2c44a"
+    [<Literal>]
+    let private ppDocLayoutSModelFileName = "pp-doclayout-s.onnx"
 
-        let baseUrl =
-            $"https://huggingface.co/docling-project/docling-layout-heron-onnx/resolve/{revision}"
+    [<Literal>]
+    let private ppDocLayoutSModelUrl =
+        "https://github.com/GreatV/oar-ocr/releases/download/v0.3.0/pp-doclayout-s.onnx"
 
-        { id = "docling-project/docling-layout-heron-onnx-float32-ff99ff9"
-          modelUrl = $"{baseUrl}/model.onnx"
-          configUrl = $"{baseUrl}/config.json"
-          preprocessorConfigUrl = $"{baseUrl}/preprocessor_config.json"
-          modelFileName = "model.onnx"
-          configFileName = "config.json"
-          preprocessorConfigFileName = "preprocessor_config.json" }
+    [<Literal>]
+    let private ppDocLayoutSModelSha256 =
+        "c2336493a0a13cd9b9b457ca68aea370b327c362a4a7da4917c2bba96029bceb"
 
     let private rapidOcrModelFolders storageRoot =
         [ Environment.GetEnvironmentVariable "FSKAME_RAPIDOCR_MODELS"
@@ -87,19 +84,6 @@ module DoclingHybrid =
           Path.Combine(storageRoot, "models", "rapidocr") ]
         |> List.choose Text.notEmpty
         |> List.distinctBy _.ToLowerInvariant()
-
-    let private toRgbImage (bitmap: SKBitmap) =
-        let pixels = Array.zeroCreate<byte> (bitmap.Width * bitmap.Height * 3)
-
-        for y = 0 to bitmap.Height - 1 do
-            for x = 0 to bitmap.Width - 1 do
-                let color = bitmap.GetPixel(x, y)
-                let offset = (y * bitmap.Width + x) * 3
-                pixels[offset] <- color.Red
-                pixels[offset + 1] <- color.Green
-                pixels[offset + 2] <- color.Blue
-
-        DoclingRgbImage.create bitmap.Width bitmap.Height pixels
 
     let private toBitmap (image: DoclingRgbImage) =
         DoclingRgbImage.validate image
@@ -119,33 +103,6 @@ module DoclingHybrid =
 
         bitmap
 
-    type PdfToImageRasterizer(options: DoclingHybridOptions) =
-        interface IDoclingPageRasterizer with
-            member _.RasterizeAsync path =
-                async {
-                    try
-                        let renderOptions =
-                            RenderOptions(Dpi = max 36 options.rasterDpi, WithAnnotations = true, WithFormFill = true)
-
-                        let pdfBytes = File.ReadAllBytes path
-
-                        let pages: DoclingRasterPage list =
-                            Conversion.ToImages(pdfBytes, "", renderOptions)
-                            |> Seq.mapi (fun index bitmap ->
-                                use bitmap = bitmap
-
-                                { pageNo = index + 1
-                                  image = toRgbImage bitmap })
-                            |> Seq.toList
-
-                        if List.isEmpty pages then
-                            return Error $"No rasterized pages were produced for '{path}'."
-                        else
-                            return Ok pages
-                    with ex ->
-                        return Error $"Unable to rasterize PDF '{path}' for Docling hybrid parsing: {ex.Message}"
-                }
-
     let mutable private rasterizerFactory: (DoclingHybridOptions -> IDoclingPageRasterizer) option =
         None
 
@@ -156,7 +113,14 @@ module DoclingHybrid =
     let private createRasterizer options =
         match rasterizerFactory with
         | Some factory -> factory options
-        | None -> PdfToImageRasterizer(options) :> IDoclingPageRasterizer
+        | None ->
+            { new IDoclingPageRasterizer with
+                member _.RasterizeAsync path =
+                    async {
+                        return
+                            Error
+                                $"No Docling PDF rasterizer is registered for '{path}'. Reference FsKame.PdfRasterization and call PdfRasterizer.register() before using Hybrid PDF parsing."
+                    } }
 
     type private RapidOcrProvider(ocr: RapidOcr) =
         let gate = obj ()
@@ -260,51 +224,95 @@ module DoclingHybrid =
 
                         Error $"RapidOCR model setup failed: {ex.Message}"
 
-    type private DoclingLayoutHeronOnnx(files: DoclingOnnxModelFiles) =
+    let private sha256Hex (bytes: byte[]) =
+        use sha = SHA256.Create()
+
+        sha.ComputeHash bytes
+        |> Array.map (fun value -> value.ToString("x2"))
+        |> String.concat ""
+
+    let private ensurePpDocLayoutSDownloadedAsync (client: HttpClient) storageRoot =
+        async {
+            let folder = doclingModelFolder storageRoot "pp-doclayout-s-onnx-v0.3.0"
+            Directory.CreateDirectory folder |> ignore
+            let path = Path.Combine(folder, ppDocLayoutSModelFileName)
+
+            let isValidModel path =
+                File.Exists path
+                && String.Equals(sha256Hex (File.ReadAllBytes path), ppDocLayoutSModelSha256, StringComparison.Ordinal)
+
+            if isValidModel path then
+                return Ok path
+            else
+                try
+                    let! bytes = client.GetByteArrayAsync(ppDocLayoutSModelUrl) |> Async.AwaitTask
+                    let actualHash = sha256Hex bytes
+
+                    if not (String.Equals(actualHash, ppDocLayoutSModelSha256, StringComparison.Ordinal)) then
+                        return
+                            Error
+                                $"PP-DocLayout-S ONNX hash mismatch. Expected {ppDocLayoutSModelSha256}, got {actualHash}."
+                    else
+                        let tempPath = $"{path}.tmp"
+                        File.WriteAllBytes(tempPath, bytes)
+
+                        if File.Exists path then
+                            File.Delete path
+
+                        File.Move(tempPath, path)
+                        return Ok path
+                with ex ->
+                    return Error $"Unable to download PP-DocLayout-S ONNX model: {ex.Message}"
+        }
+
+    type private PpDocLayoutSOnnx(modelPath: string) =
         let threshold = 0.3f
-        let width = 640
-        let height = 640
-        let rescaleFactor = 0.00392156862745098f
+        let width = 480
+        let height = 480
+        let scaleFactor = 1.0f / 255.0f
 
         let labels =
-            [ 0, "caption"
-              1, "footnote"
-              2, "formula"
-              3, "list_item"
-              4, "page_footer"
-              5, "page_header"
-              6, "picture"
-              7, "section_header"
+            [ 0, "paragraph_title"
+              1, "image"
+              2, "text"
+              3, "number"
+              4, "abstract"
+              5, "content"
+              6, "figure_title"
+              7, "formula"
               8, "table"
-              9, "text"
-              10, "title"
-              11, "document_index"
-              12, "code"
-              13, "checkbox_selected"
-              14, "checkbox_unselected"
-              15, "form"
-              16, "key_value_region" ]
+              9, "table_title"
+              10, "reference"
+              11, "doc_title"
+              12, "footnote"
+              13, "header"
+              14, "algorithm"
+              15, "footer"
+              16, "seal"
+              17, "chart_title"
+              18, "chart"
+              19, "formula_number"
+              20, "header_image"
+              21, "footer_image"
+              22, "aside_text" ]
             |> Map.ofList
 
-        let session = new InferenceSession(files.modelPath)
+        let session = new InferenceSession(modelPath)
         let gate = obj ()
 
         let inputName name =
             session.InputMetadata.Keys
             |> Seq.tryFind (fun key -> String.Equals(key, name, StringComparison.OrdinalIgnoreCase))
-            |> Option.defaultWith (fun () -> failwith $"Docling layout ONNX input '{name}' was not found.")
+            |> Option.defaultWith (fun () -> failwith $"PP-DocLayout-S ONNX input '{name}' was not found.")
 
-        let imagesInputName = inputName "images"
-        let originalTargetSizesInputName = inputName "orig_target_sizes"
+        let imageInputName = inputName "image"
+        let scaleFactorInputName = inputName "scale_factor"
 
-        let outputName name =
+        let primaryOutputName =
             session.OutputMetadata.Keys
-            |> Seq.tryFind (fun key -> String.Equals(key, name, StringComparison.OrdinalIgnoreCase))
-            |> Option.defaultWith (fun () -> failwith $"Docling layout ONNX output '{name}' was not found.")
-
-        let labelsOutputName = outputName "labels"
-        let boxesOutputName = outputName "boxes"
-        let scoresOutputName = outputName "scores"
+            |> Seq.tryFind (fun key -> String.Equals(key, "fetch_name_0", StringComparison.OrdinalIgnoreCase))
+            |> Option.orElseWith (fun () -> session.OutputMetadata.Keys |> Seq.tryHead)
+            |> Option.defaultWith (fun () -> failwith "PP-DocLayout-S ONNX model has no outputs.")
 
         let resize (image: DoclingRgbImage) =
             use source = toBitmap image
@@ -313,7 +321,6 @@ module DoclingHybrid =
 
             use canvas = new SKCanvas(resized)
             canvas.Clear(SKColors.White)
-
             canvas.DrawBitmap(source, SKRect(0f, 0f, float32 width, float32 height))
 
             resized
@@ -327,87 +334,151 @@ module DoclingHybrid =
                 for x = 0 to width - 1 do
                     let color = bitmap.GetPixel(x, y)
                     let offset = y * width + x
-                    values[offset] <- float32 color.Red * rescaleFactor
-                    values[plane + offset] <- float32 color.Green * rescaleFactor
-                    values[(2 * plane) + offset] <- float32 color.Blue * rescaleFactor
+                    values[offset] <- float32 color.Red * scaleFactor
+                    values[plane + offset] <- float32 color.Green * scaleFactor
+                    values[(2 * plane) + offset] <- float32 color.Blue * scaleFactor
 
             let tensor = DenseTensor<float32>(values, [| 1; 3; height; width |])
-            NamedOnnxValue.CreateFromTensor(imagesInputName, tensor)
+            NamedOnnxValue.CreateFromTensor(imageInputName, tensor)
 
-        let originalTargetSizesInput (image: DoclingRgbImage) =
-            let tensor =
-                DenseTensor<int64>([| int64 image.height; int64 image.width |], [| 1; 2 |])
+        let scaleFactorInput (image: DoclingRgbImage) =
+            let values =
+                [| float32 height / float32 image.height; float32 width / float32 image.width |]
 
-            NamedOnnxValue.CreateFromTensor(originalTargetSizesInputName, tensor)
+            let tensor = DenseTensor<float32>(values, [| 1; 2 |])
+            NamedOnnxValue.CreateFromTensor(scaleFactorInputName, tensor)
 
-        let outputTensor name (outputs: IDisposableReadOnlyCollection<DisposableNamedOnnxValue>) =
+        let outputTensor (outputs: IDisposableReadOnlyCollection<DisposableNamedOnnxValue>) =
             outputs
-            |> Seq.tryFind (fun output -> String.Equals(output.Name, name, StringComparison.Ordinal))
-            |> Option.defaultWith (fun () -> failwith $"Docling layout ONNX output '{name}' was not returned.")
-            |> _.AsTensor<'T>()
+            |> Seq.tryFind (fun output -> String.Equals(output.Name, primaryOutputName, StringComparison.Ordinal))
+            |> Option.defaultWith (fun () ->
+                failwith $"PP-DocLayout-S ONNX output '{primaryOutputName}' was not returned.")
+            |> _.AsTensor<float32>()
 
-        let labelFor labelId =
-            labels
-            |> Map.tryFind labelId
-            |> Option.defaultValue $"label_{labelId}"
-            |> DoclingLabels.ofJsonValue
+        let labelFor label =
+            match label with
+            | "paragraph_title" -> DoclingLabel.SectionHeader
+            | "doc_title" -> DoclingLabel.Title
+            | "image"
+            | "header_image"
+            | "footer_image" -> DoclingLabel.Picture
+            | "chart" -> DoclingLabel.Chart
+            | "figure_title"
+            | "table_title"
+            | "chart_title" -> DoclingLabel.Caption
+            | "formula"
+            | "formula_number" -> DoclingLabel.Formula
+            | "table" -> DoclingLabel.Table
+            | "header" -> DoclingLabel.PageHeader
+            | "footer" -> DoclingLabel.PageFooter
+            | "footnote" -> DoclingLabel.Footnote
+            | "algorithm" -> DoclingLabel.Code
+            | _ -> DoclingLabel.Text
+
+        let thresholdFor label =
+            match label with
+            | "paragraph_title"
+            | "formula" -> 0.3f
+            | "text" -> 0.4f
+            | "seal" -> 0.45f
+            | _ -> 0.5f
 
         let clamp limit value =
             Math.Min(float limit, Math.Max(0.0, float value))
 
-        let boxFor (image: DoclingRgbImage) (box: float32[]) =
-            let l = clamp image.width box[0]
-            let t = clamp image.height box[1]
-            let r = clamp image.width box[2]
-            let b = clamp image.height box[3]
+        let boxFor (image: DoclingRgbImage) x1 y1 x2 y2 =
+            let normalized = x2 <= 1.05f && y2 <= 1.05f && x1 >= -0.05f && y1 >= -0.05f
 
-            { l = l
-              t = t
-              r = r
-              b = b
+            let l, t, r, b =
+                if normalized then
+                    float x1 * float image.width,
+                    float y1 * float image.height,
+                    float x2 * float image.width,
+                    float y2 * float image.height
+                else
+                    float x1, float y1, float x2, float y2
+
+            { l = clamp image.width l
+              t = clamp image.height t
+              r = clamp image.width r
+              b = clamp image.height b
               coordOrigin = DoclingCoordinateOrigin.TopLeft }
+
+        let boxArea bbox =
+            max 0.0 (bbox.r - bbox.l) * max 0.0 (bbox.b - bbox.t)
+
+        let intersectionOverUnion left right =
+            let l = max left.l right.l
+            let t = max left.t right.t
+            let r = min left.r right.r
+            let b = min left.b right.b
+            let intersection = max 0.0 (r - l) * max 0.0 (b - t)
+            let union = boxArea left + boxArea right - intersection
+
+            if union <= 0.0 then 0.0 else intersection / union
+
+        let applyNms clusters =
+            let sorted = clusters |> List.sortByDescending (fun cluster -> cluster.confidence)
+
+            let rec loop kept remaining =
+                match remaining with
+                | [] -> List.rev kept
+                | cluster :: rest ->
+                    let shouldKeep =
+                        kept
+                        |> List.forall (fun keptCluster ->
+                            let threshold = if keptCluster.label = cluster.label then 0.6 else 0.98
+
+                            intersectionOverUnion keptCluster.bbox cluster.bbox < threshold)
+
+                    if shouldKeep then
+                        loop (cluster :: kept) rest
+                    else
+                        loop kept rest
+
+            loop [] sorted
 
         let predictOne (page: DoclingPageInput) =
             let imageInput = imageInput page.image
-            let targetSizesInput = originalTargetSizesInput page.image
+            let scaleFactorInput = scaleFactorInput page.image
 
-            use outputs = session.Run([ imageInput; targetSizesInput ])
+            use outputs = session.Run([ imageInput; scaleFactorInput ])
+            let tensor = outputTensor outputs
+            let values = tensor |> Seq.toArray
 
-            let labelsTensor: Tensor<int64> = outputTensor labelsOutputName outputs
-            let boxesTensor: Tensor<float32> = outputTensor boxesOutputName outputs
-            let scoresTensor: Tensor<float32> = outputTensor scoresOutputName outputs
-
-            let labelValues = labelsTensor |> Seq.toArray
-            let boxValues = boxesTensor |> Seq.toArray
-            let scoreValues = scoresTensor |> Seq.toArray
-
-            let queryCount =
-                if scoresTensor.Dimensions.Length >= 2 then
-                    scoresTensor.Dimensions[1]
+            let boxCount =
+                if tensor.Dimensions.Length >= 2 then
+                    tensor.Dimensions[0]
                 else
-                    scoreValues.Length
+                    values.Length / 6
 
             let clusters =
-                [ for index = 0 to queryCount - 1 do
-                      let score = scoreValues[index]
+                [ for index = 0 to boxCount - 1 do
+                      let offset = index * 6
 
-                      if score >= threshold then
-                          let label = labelFor (int labelValues[index])
-                          let boxOffset = index * 4
+                      if offset + 5 < values.Length then
+                          let classId = int (MathF.Round values[offset])
+                          let score = values[offset + 1]
 
-                          let bbox =
-                              boxFor
-                                  page.image
-                                  [| boxValues[boxOffset]
-                                     boxValues[boxOffset + 1]
-                                     boxValues[boxOffset + 2]
-                                     boxValues[boxOffset + 3] |]
+                          match labels |> Map.tryFind classId with
+                          | Some rawLabel when score >= threshold && score >= thresholdFor rawLabel ->
+                              let bbox =
+                                  boxFor
+                                      page.image
+                                      values[offset + 2]
+                                      values[offset + 3]
+                                      values[offset + 4]
+                                      values[offset + 5]
 
-                          { id = index
-                            label = label
-                            confidence = score
-                            bbox = bbox
-                            cells = [] } ]
+                              if bbox.r > bbox.l && bbox.b > bbox.t then
+                                  { id = index
+                                    label = labelFor rawLabel
+                                    confidence = score
+                                    bbox = bbox
+                                    cells = [] }
+                          | _ -> () ]
+                |> applyNms
+                |> List.truncate 100
 
             { pageNo = page.pageNo
               clusters = clusters }
@@ -419,7 +490,7 @@ module DoclingHybrid =
                         let predictions = lock gate (fun () -> pages |> List.map predictOne)
                         return Ok predictions
                     with ex ->
-                        return Error $"Docling layout ONNX prediction failed: {ex.Message}"
+                        return Error $"PP-DocLayout-S ONNX prediction failed: {ex.Message}"
                 }
 
         interface IDisposable with
@@ -429,17 +500,15 @@ module DoclingHybrid =
         async {
             try
                 use client = new HttpClient()
+                let! modelPath = ensurePpDocLayoutSDownloadedAsync client storageRoot
 
-                let! files =
-                    ModelCatalog.ensureDoclingOnnxDownloadedAsync
-                        client
-                        (doclingModelFolder storageRoot "docling-layout-heron-float32-ff99ff9")
-                        doclingLayoutHeronFloat32Onnx
-
-                let predictor = new DoclingLayoutHeronOnnx(files)
-                return Ok(predictor :> IDoclingLayoutPredictor, predictor :> IDisposable)
+                match modelPath with
+                | Error err -> return Error err
+                | Ok modelPath ->
+                    let predictor = new PpDocLayoutSOnnx(modelPath)
+                    return Ok(predictor :> IDoclingLayoutPredictor, predictor :> IDisposable)
             with ex ->
-                return Error $"Unable to initialize Docling layout ONNX model: {ex.Message}"
+                return Error $"Unable to initialize PP-DocLayout-S ONNX model: {ex.Message}"
         }
 
     let private loadFigureClassifier options storageRoot =
