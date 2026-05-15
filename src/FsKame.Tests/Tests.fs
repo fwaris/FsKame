@@ -591,6 +591,7 @@ let ``docling hybrid page input builder skips ocr when native pdf text is suffic
             DoclingHybrid.buildPageInputs
                 { DoclingHybrid.defaults with
                     minNativeCharsPerPage = 8 }
+                ignore
                 "/tmp/native.pdf"
                 rasterizer
                 nativeProvider
@@ -647,6 +648,7 @@ let ``docling hybrid provider path emits native text table picture metadata and 
             DoclingHybrid.readPdfPassagesWithProviders
                 { DoclingHybrid.defaults with
                     minNativeCharsPerPage = 8 }
+                ignore
                 FsColbert.ChunkOptions.fsKameDefaults
                 passageSource
                 "/tmp/doc.pdf"

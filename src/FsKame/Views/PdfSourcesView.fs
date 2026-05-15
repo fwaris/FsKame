@@ -26,7 +26,7 @@ module PdfSourcesView =
             .width(34.)
             .height(34.)
             .padding(0.)
-            .margin(0,-2,2,0)
+            .margin(0, -2, 2, 0)
             .isEnabled(canMutateDocuments model)
             .alignEndHorizontal()
             .centerVertical ()
@@ -51,7 +51,19 @@ module PdfSourcesView =
             .strokeThickness(1.)
             .strokeShape (RoundRectangle(CornerRadius(8.)))
 
-    let private row canMutateDocuments canChangeSourceSelection (doc: PdfDocumentSource) =
+    let private row processingActive canMutateDocuments canChangeSourceSelection (doc: PdfDocumentSource) =
+        let deleteIcon =
+            if processingActive then
+                Icons.deleteForever
+            else
+                Icons.delete
+
+        let deleteMessage =
+            if processingActive then
+                CancelPdfProcessing
+            else
+                DeletePdf doc.id
+
         Border(
             (Grid(
                 [ Dimension.Absolute 42.
@@ -87,8 +99,8 @@ module PdfSourcesView =
                         .gridColumn(2)
                         .gridRowSpan (2)
 
-                (ViewControls.compactDangerIconButton Icons.delete (DeletePdf doc.id))
-                    .isEnabled(canMutateDocuments)
+                (ViewControls.compactDangerIconButton deleteIcon deleteMessage)
+                    .isEnabled(processingActive || canMutateDocuments)
                     .gridColumn(3)
                     .gridRowSpan (2)
             })
@@ -102,6 +114,7 @@ module PdfSourcesView =
     let view model =
         let canMutateDocuments = canMutateDocuments model
         let canChangeSourceSelection = canChangeSourceSelection model
+        let processingActive = model.documentProcessingCancellation.IsSome
 
         Border(
             (Grid([ Dimension.Star; Dimension.Absolute 40. ], [ Dimension.Absolute 44.; Dimension.Star ]) {
@@ -116,7 +129,9 @@ module PdfSourcesView =
                 if List.isEmpty model.pdfDocuments then
                     emptyView.gridColumnSpan(2).gridRow (1)
                 else
-                    (CollectionView (model.pdfDocuments) (row canMutateDocuments canChangeSourceSelection))
+                    (CollectionView
+                        (model.pdfDocuments)
+                        (row processingActive canMutateDocuments canChangeSourceSelection))
                         .gridColumnSpan(2)
                         .gridRow (1)
             })

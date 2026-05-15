@@ -1,6 +1,7 @@
 namespace FsKame
 
 open System
+open System.Diagnostics
 open System.Threading
 open System.Threading.Channels
 open FSharp.Control
@@ -12,6 +13,9 @@ open Microsoft.Maui.Devices
 open Microsoft.Maui.Graphics
 open Microsoft.Maui.Storage
 open OpenAI.Chat
+#if ANDROID
+open Android.Util
+#endif
 
 module Update =
     let private minLogFontSize = 10.
@@ -85,6 +89,15 @@ module Update =
 
         saveLog :: log |> List.truncate C.MAX_LOG
 
+    let private processingReport (model: Model) msg =
+        let text = $"PDF processing: {msg}"
+        Debug.WriteLine text
+        Console.WriteLine text
+#if ANDROID
+        Log.Info("FsKame", text) |> ignore
+#endif
+        model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+
     let private createChatClient (key: string) (modelId: string) : IChatClient =
         let client = OpenAI.OpenAIClient(key)
         client.GetResponsesClient().AsIChatClient(modelId)
@@ -127,6 +140,10 @@ module Update =
                     useCaseProfile = useCase.profile
                     useCaseFingerprint = FsKame.QA.UseCaseDefinition.fingerprint useCase }
 
+    let private withKeywordCancellation token (options: FsKame.QA.KnowledgeSources.KeywordGenerationOptions) =
+        { options with
+            cancellationToken = Some token }
+
     let private postSources model =
         match model.bundle with
         | Some bundle ->
@@ -156,13 +173,28 @@ module Update =
                 return Error ex
         }
 
-    let private processDocuments report keywordOptions useHybridPdfParsing (docs: PdfDocumentSource list) =
+    let private processDocuments
+        report
+        (cancellationToken: CancellationToken)
+        keywordOptions
+        useHybridPdfParsing
+        (docs: PdfDocumentSource list)
+        =
         async {
             try
+                let parserName = if useHybridPdfParsing then "Hybrid" else "Legacy"
+
+                report $"Starting document processing command for {docs.Length} document(s); parser={parserName}."
+                cancellationToken.ThrowIfCancellationRequested()
+
                 let! results = PdfLibrary.processDocuments report keywordOptions useHybridPdfParsing docs
+                report $"Document processing command completed for {docs.Length} document(s)."
                 return Ok results
-            with ex ->
-                return Error ex
+            with
+            | :? OperationCanceledException as ex ->
+                report "Document processing was canceled."
+                return Error(ex :> exn)
+            | ex -> return Error ex
         }
 
     let private installPrebuiltDocuments docs =
@@ -235,6 +267,18 @@ module Update =
             else
                 doc)
 
+    let private disposeDocumentProcessingCancellation (model: Model) =
+        model.documentProcessingCancellation |> Option.iter _.Dispose()
+
+    let private documentProcessingCommand report (cts: CancellationTokenSource) (model: Model) docs =
+        let keywordOptions = keywordOptions model |> withKeywordCancellation cts.Token
+
+        Cmd.OfAsync.either
+            (processDocuments report cts.Token keywordOptions model.useHybridPdfParsing)
+            docs
+            PdfProcessingCompleted
+            EventError
+
     let private startParams model =
         let useCase = composeUseCase model
 
@@ -286,6 +330,7 @@ module Update =
           logFontSize = 12.
           hideSecrets = true
           isBusy = false
+          documentProcessingCancellation = None
           logExpansions = Settings.logExpansions ()
           logChunks = Settings.logChunks ()
           useLexicalFilter =
@@ -423,12 +468,15 @@ module Update =
                     |> List.truncate C.MAX_LOG },
             Cmd.none
         | Settings_Show ->
-            match sourceConfigBlocked model "Opening settings" with
-            | Some msg ->
+            if model.isBusy then
                 { model with
-                    log = msg :: model.log |> List.truncate C.MAX_LOG },
+                    log =
+                        "Opening settings is unavailable while another operation is running."
+                        :: model.log
+                        |> List.truncate C.MAX_LOG },
                 Cmd.none
-            | None -> { model with currentPage = Settings }, Cmd.none
+            else
+                { model with currentPage = Settings }, Cmd.none
         | Settings_Close ->
             saveSettings model
             { model with currentPage = Main }, Cmd.none
@@ -474,21 +522,20 @@ module Update =
             if List.isEmpty docs then
                 { model with isBusy = false }, Cmd.none
             else
-                let report msg =
-                    model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+                let report msg = processingReport model msg
+                let cts = new CancellationTokenSource()
 
-                model,
-                Cmd.OfAsync.either
-                    (processDocuments report (keywordOptions model) model.useHybridPdfParsing)
-                    docs
-                    PdfProcessingCompleted
-                    EventError
+                { model with
+                    documentProcessingCancellation = Some cts },
+                documentProcessingCommand report cts model docs
         | PickPdfsCompleted(Error ex) ->
             { model with
                 isBusy = false
                 log = $"Document picker failed: {ex.Message}" :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
         | PdfProcessingCompleted(Ok results) ->
+            disposeDocumentProcessingCancellation model
+
             let pdfDocuments =
                 results
                 |> List.fold (fun docs result -> docs |> List.map (applyProcessingResult result)) model.pdfDocuments
@@ -505,6 +552,7 @@ module Update =
                 { model with
                     pdfDocuments = pdfDocuments
                     isBusy = false
+                    documentProcessingCancellation = None
                     log = log }
 
             let model =
@@ -514,7 +562,19 @@ module Update =
             postSources model
             model, Cmd.none
         | PdfProcessingCompleted(Error ex) ->
-            let error = $"Document processing failed: {ex.Message}"
+            disposeDocumentProcessingCancellation model
+
+            let canceled =
+                match ex with
+                | :? OperationCanceledException -> true
+                | _ -> false
+
+            let error =
+                if canceled then
+                    "Document processing canceled."
+                else
+                    $"Document processing failed: {ex.Message}"
+
             let pdfDocuments = failProcessingDocuments error model.pdfDocuments
 
             let log = error :: model.log |> List.truncate C.MAX_LOG
@@ -523,11 +583,26 @@ module Update =
                 { model with
                     pdfDocuments = pdfDocuments
                     isBusy = false
+                    documentProcessingCancellation = None
                     log = log }
 
             { model with
                 log = savePdfLibraryWithLog model.pdfDocuments model.log },
             Cmd.none
+        | CancelPdfProcessing ->
+            match model.documentProcessingCancellation with
+            | None ->
+                { model with
+                    log =
+                        "No document processing operation is running." :: model.log
+                        |> List.truncate C.MAX_LOG },
+                Cmd.none
+            | Some cts ->
+                cts.Cancel()
+
+                { model with
+                    log = "Canceling document processing..." :: model.log |> List.truncate C.MAX_LOG },
+                Cmd.none
         | PdfSelectionChanged(id, selected) ->
             if not (canChangeSourceSelection model) then
                 { model with
@@ -576,19 +651,16 @@ module Update =
                             pdfDocuments = retryDocs ids model.pdfDocuments
                             isBusy = true }
 
-                    let report msg =
-                        model.mailbox.Writer.TryWrite(Log_Append msg) |> ignore
+                    let report msg = processingReport model msg
+                    let cts = new CancellationTokenSource()
 
                     let model =
                         { model with
                             log = savePdfLibraryWithLog model.pdfDocuments model.log }
 
-                    model,
-                    Cmd.OfAsync.either
-                        (processDocuments report (keywordOptions model) model.useHybridPdfParsing)
-                        retry
-                        PdfProcessingCompleted
-                        EventError
+                    { model with
+                        documentProcessingCancellation = Some cts },
+                    documentProcessingCommand report cts model retry
         | DeletePdf id ->
             match documentMutationBlocked model "Deleting documents" with
             | Some msg ->
@@ -703,8 +775,11 @@ module Update =
                 logFontSize = clampLogFontSize (model.logFontSize - logFontStep) },
             Cmd.none
         | EventError ex ->
+            disposeDocumentProcessingCancellation model
+
             { model with
                 isBusy = false
+                documentProcessingCancellation = None
                 log = ex.Message :: model.log |> List.truncate C.MAX_LOG },
             Cmd.none
 

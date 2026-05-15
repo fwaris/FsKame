@@ -1,5 +1,6 @@
 namespace FsKame
 
+open System.Threading
 open System.Threading.Channels
 open FsKame.WorkFlow
 open RTFlow
@@ -43,6 +44,7 @@ and Model =
       logFontSize: float
       hideSecrets: bool
       isBusy: bool
+      documentProcessingCancellation: CancellationTokenSource option
       logExpansions: bool
       logChunks: bool
       useLexicalFilter: bool
@@ -60,6 +62,7 @@ and Msg =
     | PickPdfs
     | PickPdfsCompleted of Result<PdfDocumentSource list, exn>
     | PdfProcessingCompleted of Result<PdfProcessResult list, exn>
+    | CancelPdfProcessing
     | PdfSelectionChanged of string * bool
     | RetryPdfProcessing of string
     | DeletePdf of string

@@ -37,7 +37,14 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
-  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'ios' OR $(TargetPlatformIdentifier) == 'maccatalyst'">
+  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'ios'">
+    <MtouchLink>None</MtouchLink>
+    <UseInterpreter>true</UseInterpreter>
+    <MtouchInterpreter>all</MtouchInterpreter>
+    <RunAOTCompilation>false</RunAOTCompilation>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(TargetPlatformIdentifier) == 'maccatalyst'">
     <MtouchLink>None</MtouchLink>
     <UseInterpreter>true</UseInterpreter>
     <MtouchInterpreter>-all</MtouchInterpreter>
@@ -111,12 +118,14 @@
     <AndroidResource Update="$(AndroidProjectFolder)Resources/raw/*" />
     <AndroidAsset Include="$(AndroidProjectFolder)Assets/**/*" Exclude="$(AndroidProjectFolder)Assets/**/.*/**" />
     <AndroidManifest Include="$(AndroidProjectFolder)AndroidManifest.xml" />
+    <Compile Include="$(AndroidProjectFolder)PdfRendererRasterizer.fs" />
     <Compile Include="$(AndroidProjectFolder)MainActivity.fs" />
     <Compile Include="$(AndroidProjectFolder)MainApplication.fs" />
   </ItemGroup>
 
   <ItemGroup Condition="$(TargetPlatformIdentifier) == 'ios'">
     <None Include="$(iOSProjectFolder)Info.plist" LogicalName="Info.plist" />
+    <Compile Include="$(MacCatalystProjectFolder)PdfKitRasterizer.fs" />
     <Compile Include="$(iOSProjectFolder)AppDelegate.fs" />
     <Compile Include="$(iOSProjectFolder)Program.fs" />
   </ItemGroup>
@@ -155,8 +164,7 @@
     <PackageReference Include="FSharp.SystemTextJson" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.Extensions" />
-    <PackageReference Include="PDFtoImage" Condition="'$(TargetFramework)' != 'net10.0-maccatalyst'" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Extensions" Condition="'$(TargetPlatformIdentifier)' != 'android'" />
     <PackageReference Include="RapidOCR.Net" />
     <PackageReference Include="RTOpenAI.Api" />
     <PackageReference Include="RTOpenAI.Events" />

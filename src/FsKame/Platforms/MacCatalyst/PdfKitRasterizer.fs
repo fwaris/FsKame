@@ -101,4 +101,8 @@ module PdfKitRasterizer =
                 }
 
     let register () =
+        FsKame.QA.DoclingHybrid.setDefaultOptions
+            { FsKame.QA.DoclingHybrid.defaults with
+                enableLayoutAnalysis = false }
+
         FsKame.QA.DoclingHybrid.setRasterizerFactory (fun options -> Rasterizer(options) :> IDoclingPageRasterizer)

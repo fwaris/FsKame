@@ -1,6 +1,7 @@
 namespace FsKame.QA
 
 open System
+open System.Diagnostics
 open System.IO
 open System.Net.Http
 open Microsoft.ML.OnnxRuntime
@@ -15,15 +16,48 @@ type DoclingHybridOptions =
       ocrDedupeOverlapThreshold: float
       rasterDpi: int
       enableOcr: bool
+      enableLayoutAnalysis: bool
       enableFigureClassification: bool }
 
 module DoclingHybrid =
     let defaults =
         { minNativeCharsPerPage = 24
           ocrDedupeOverlapThreshold = 0.75
-          rasterDpi = 144
+          rasterDpi = 96
           enableOcr = true
+          enableLayoutAnalysis = true
           enableFigureClassification = false }
+
+    let mutable private activeDefaults = defaults
+
+    let setDefaultOptions options = activeDefaults <- options
+
+    let resetDefaultOptions () = activeDefaults <- defaults
+
+    let private timed report label operation =
+        async {
+            let timer = Stopwatch.StartNew()
+            report $"{label}..."
+
+            try
+                let! result = operation
+                timer.Stop()
+                report (sprintf "%s completed in %.1fs." label timer.Elapsed.TotalSeconds)
+                return result
+            with ex ->
+                timer.Stop()
+                report (sprintf "%s failed after %.1fs: %s" label timer.Elapsed.TotalSeconds ex.Message)
+                return raise ex
+        }
+
+    let private withTimeout timeoutMs errorMessage operation =
+        async {
+            try
+                let! child = Async.StartChild(operation, timeoutMs)
+                return! child
+            with :? TimeoutException ->
+                return Error errorMessage
+        }
 
     let private fsColbertRoot storageRoot =
         let path = Path.Combine(storageRoot, "FsKame", "FsColbert")
@@ -431,22 +465,37 @@ module DoclingHybrid =
 
     let buildPageInputs
         (options: DoclingHybridOptions)
+        (report: string -> unit)
         (path: string)
         (rasterizer: IDoclingPageRasterizer)
         (nativeTextProvider: string -> Async<Result<DoclingNativePageText list, string>>)
         (ocrProvider: IDoclingOcrProvider option)
         =
         async {
-            let! rasterized = rasterizer.RasterizeAsync path
+            let! rasterized =
+                rasterizer.RasterizeAsync path
+                |> timed report $"Docling hybrid rasterizing {Path.GetFileName path} at {max 36 options.rasterDpi} DPI"
+                |> withTimeout
+                    45000
+                    $"Docling hybrid rasterization timed out for {Path.GetFileName path}; falling back to legacy PDF parsing."
 
             match rasterized with
             | Error err -> return Error err
             | Ok(rasterized: DoclingRasterPage list) ->
-                let! nativeResult = nativeTextProvider path
+                report $"Docling hybrid rasterized {rasterized.Length} page(s) for {Path.GetFileName path}."
+
+                let! nativeResult =
+                    nativeTextProvider path
+                    |> timed report $"Docling hybrid reading native PDF text for {Path.GetFileName path}"
+                    |> withTimeout
+                        30000
+                        $"Docling hybrid native text extraction timed out for {Path.GetFileName path}; falling back to legacy PDF parsing."
 
                 match nativeResult with
                 | Error err -> return Error err
                 | Ok nativePages ->
+                    report $"Docling hybrid read native text from {nativePages.Length} page(s)."
+
                     let nativeByPage =
                         nativePages |> List.map (fun page -> page.pageNo, page) |> Map.ofList
 
@@ -482,7 +531,12 @@ module DoclingHybrid =
                                             Error
                                                 $"Page {page.pageNo} has insufficient native PDF text and no RapidOCR model is configured."
                                     | Some ocrProvider ->
-                                        let! ocrResult = ocrProvider.RecognizeAsync page
+                                        let! ocrResult =
+                                            ocrProvider.RecognizeAsync page
+                                            |> timed report $"Docling hybrid OCR page {page.pageNo}"
+                                            |> withTimeout
+                                                30000
+                                                $"Docling hybrid OCR timed out on page {page.pageNo}; falling back to legacy PDF parsing."
 
                                         match ocrResult with
                                         | Error err -> return Error err
@@ -505,11 +559,113 @@ module DoclingHybrid =
                     return! loop rasterized []
         }
 
-    let readPdfPassagesWithProviders
-        options
+    let private convertPageInputs
+        report
         chunkOptions
         passageSource
-        path
+        (path: string)
+        layoutPredictor
+        figureClassifier
+        (pageInputs: DoclingPageInput list)
+        =
+        async {
+            let documentName = Path.GetFileNameWithoutExtension path
+            report $"Docling hybrid converting {pageInputs.Length} page(s) for {Path.GetFileName path}."
+
+            let! document =
+                DoclingStandardHybrid.convertPagesWithOptions
+                    DoclingConversionOptions.defaults
+                    documentName
+                    (Some(Path.GetFileName path))
+                    layoutPredictor
+                    figureClassifier
+                    pageInputs
+                |> timed report $"Docling hybrid layout conversion for {Path.GetFileName path}"
+                |> withTimeout
+                    45000
+                    $"Docling hybrid layout conversion timed out for {Path.GetFileName path}; falling back to legacy PDF parsing."
+
+            return document |> Result.map (DoclingPassages.toPassages chunkOptions passageSource)
+        }
+
+    let private convertNativeTextOnly
+        report
+        chunkOptions
+        passageSource
+        (path: string)
+        (pageInputs: DoclingPageInput list)
+        =
+        let documentName = Path.GetFileNameWithoutExtension path
+
+        let pages =
+            pageInputs
+            |> List.map (fun page ->
+                page.pageNo,
+                { pageNo = page.pageNo
+                  size =
+                    { width = float page.image.width
+                      height = float page.image.height } })
+            |> Map.ofList
+
+        let textItems =
+            pageInputs
+            |> List.mapi (fun index page ->
+                let text =
+                    page.ocrCells
+                    |> List.map _.text
+                    |> String.concat "\n"
+                    |> Text.normalizeWhitespace
+
+                match Text.notEmpty text with
+                | None -> None
+                | Some text ->
+                    let selfRef = $"#/texts/{index}"
+
+                    Some
+                        { selfRef = selfRef
+                          parent = "#/body"
+                          label = DoclingLabel.Text
+                          text = text
+                          orig = text
+                          contentLayer = DoclingContentLayer.Body
+                          prov =
+                            [ { pageNo = page.pageNo
+                                bbox =
+                                  { l = 0.0
+                                    t = 0.0
+                                    r = float page.image.width
+                                    b = float page.image.height
+                                    coordOrigin = DoclingCoordinateOrigin.TopLeft }
+                                charSpan = None } ]
+                          keywords = []
+                          sourceId = None
+                          sourceDisplayName = None })
+            |> List.choose id
+
+        if List.isEmpty textItems then
+            Error $"Docling hybrid native-text conversion found no readable text in {Path.GetFileName path}."
+        else
+            report
+                $"Docling hybrid using fast native-text conversion for {Path.GetFileName path}; skipping layout ONNX."
+
+            { name = documentName
+              originFileName = Some(Path.GetFileName path)
+              originMimeType = Some "application/pdf"
+              pages = pages
+              texts = textItems
+              tables = []
+              pictures = []
+              bodyChildren = textItems |> List.map _.selfRef
+              furnitureChildren = [] }
+            |> DoclingPassages.toPassages chunkOptions passageSource
+            |> Ok
+
+    let readPdfPassagesWithProviders
+        options
+        report
+        chunkOptions
+        passageSource
+        (path: string)
         rasterizer
         nativeTextProvider
         ocrProvider
@@ -517,30 +673,38 @@ module DoclingHybrid =
         figureClassifier
         =
         async {
-            let! pageInputs = buildPageInputs options path rasterizer nativeTextProvider ocrProvider
+            let! pageInputs = buildPageInputs options report path rasterizer nativeTextProvider ocrProvider
 
             match pageInputs with
             | Error err -> return Error err
             | Ok pageInputs ->
-                let documentName = Path.GetFileNameWithoutExtension path
-
-                let! document =
-                    DoclingStandardHybrid.convertPagesWithOptions
-                        DoclingConversionOptions.defaults
-                        documentName
-                        (Some(Path.GetFileName path))
-                        layoutPredictor
-                        figureClassifier
-                        pageInputs
-
-                return document |> Result.map (DoclingPassages.toPassages chunkOptions passageSource)
+                if options.enableLayoutAnalysis then
+                    return!
+                        convertPageInputs
+                            report
+                            chunkOptions
+                            passageSource
+                            path
+                            layoutPredictor
+                            figureClassifier
+                            pageInputs
+                else
+                    return convertNativeTextOnly report chunkOptions passageSource path pageInputs
         }
 
-    let private readPdfPassages options storageRoot chunkOptions passageSource path =
+    let private readPdfPassages options report storageRoot chunkOptions passageSource (path: string) =
         async {
             let rasterizer = createRasterizer options
+            report $"Docling hybrid PDF parser starting for {Path.GetFileName path}."
 
             let ocrProviderResult = tryCreateRapidOcrProvider options storageRoot
+
+            report (
+                match ocrProviderResult with
+                | Ok(Some _) -> "Docling hybrid OCR provider is enabled."
+                | Ok None -> "Docling hybrid OCR provider is not configured; native PDF text will be required."
+                | Error err -> $"Docling hybrid OCR provider setup failed: {err}"
+            )
 
             match ocrProviderResult with
             | Error err -> return Error err
@@ -549,33 +713,50 @@ module DoclingHybrid =
                     ocrProvider |> Option.map (fun provider -> provider :?> IDisposable)
 
                 try
-                    let! layout = loadLayoutPredictor storageRoot
+                    let! pageInputs =
+                        buildPageInputs options report path rasterizer DoclingPdfNative.readPageCells ocrProvider
 
-                    match layout with
+                    match pageInputs with
                     | Error err -> return Error err
-                    | Ok(layoutPredictor, layoutDisposable) ->
-                        try
-                            let! figure = loadFigureClassifier options storageRoot
+                    | Ok pageInputs ->
+                        if options.enableLayoutAnalysis then
+                            let! layout =
+                                loadLayoutPredictor storageRoot
+                                |> timed report "Docling hybrid preparing layout ONNX model"
+                                |> withTimeout
+                                    60000
+                                    "Docling hybrid layout model preparation timed out; falling back to legacy PDF parsing."
 
-                            match figure with
+                            match layout with
                             | Error err -> return Error err
-                            | Ok(figureClassifier, figureDisposable) ->
+                            | Ok(layoutPredictor, layoutDisposable) ->
                                 try
-                                    return!
-                                        readPdfPassagesWithProviders
-                                            options
-                                            chunkOptions
-                                            passageSource
-                                            path
-                                            rasterizer
-                                            DoclingPdfNative.readPageCells
-                                            ocrProvider
-                                            layoutPredictor
-                                            figureClassifier
+                                    let! figure =
+                                        loadFigureClassifier options storageRoot
+                                        |> timed report "Docling hybrid preparing figure classifier"
+                                        |> withTimeout
+                                            30000
+                                            "Docling hybrid figure classifier preparation timed out; falling back to legacy PDF parsing."
+
+                                    match figure with
+                                    | Error err -> return Error err
+                                    | Ok(figureClassifier, figureDisposable) ->
+                                        try
+                                            return!
+                                                convertPageInputs
+                                                    report
+                                                    chunkOptions
+                                                    passageSource
+                                                    path
+                                                    layoutPredictor
+                                                    figureClassifier
+                                                    pageInputs
+                                        finally
+                                            figureDisposable |> Option.iter (fun disposable -> disposable.Dispose())
                                 finally
-                                    figureDisposable |> Option.iter (fun disposable -> disposable.Dispose())
-                        finally
-                            layoutDisposable.Dispose()
+                                    layoutDisposable.Dispose()
+                        else
+                            return convertNativeTextOnly report chunkOptions passageSource path pageInputs
                 finally
                     disposableOcr |> Option.iter (fun disposable -> disposable.Dispose())
         }
@@ -616,7 +797,7 @@ module DoclingHybrid =
             let hybrid =
                 async {
                     try
-                        return! readPdfPassages defaults storageRoot chunkOptions passageSource path
+                        return! readPdfPassages activeDefaults report storageRoot chunkOptions passageSource path
                     with ex ->
                         return Error $"Docling hybrid PDF parser could not start: {ex.Message}"
                 }

@@ -7,11 +7,18 @@ open System.Security.Cryptography
 open System.Text.Json
 open System.Text.Json.Serialization
 open System.Threading
+open FSharp.Control
 open Microsoft.Extensions.AI
 open System.Text
 open System.Text.RegularExpressions
 
 module KnowledgeSources =
+    [<Literal>]
+    let private DEFAULT_KEYWORD_METADATA_PARALLELISM = 5
+
+    [<Literal>]
+    let private DEFAULT_KEYWORD_METADATA_BATCH_TIMEOUT_MS = 90000
+
     type RetrievalIndex =
         { sources: KnowledgeSource list
           chunks: SourceChunk list
@@ -44,6 +51,7 @@ module KnowledgeSources =
           batchSize: int
           parallelism: int
           maxOutputTokens: int
+          cancellationToken: CancellationToken option
           useCaseProfile: QaUseCaseProfile
           useCaseFingerprint: string }
 
@@ -54,8 +62,9 @@ module KnowledgeSources =
               modelId = "gpt-5-nano"
               schemaVersion = "passage-keywords-v1"
               batchSize = 4
-              parallelism = 2
+              parallelism = DEFAULT_KEYWORD_METADATA_PARALLELISM
               maxOutputTokens = 25000
+              cancellationToken = None
               useCaseProfile = QaUseCaseProfile.generic
               useCaseFingerprint = "" }
 
@@ -995,6 +1004,7 @@ Query: {query}
                 options.schemaVersion
                 |> Text.notEmpty
                 |> Option.defaultValue KeywordGenerationOptions.defaults.schemaVersion
+            cancellationToken = options.cancellationToken
             useCaseProfile = QaUseCaseProfile.sanitize options.useCaseProfile
             useCaseFingerprint = options.useCaseFingerprint |> Text.notEmpty |> Option.defaultValue "" }
 
@@ -1228,9 +1238,14 @@ Passages:
 
             let messages = [ ChatMessage(ChatRole.User, keywordPrompt options batch) ]
 
-            let! response =
-                client.GetResponseAsync(messages, opts, CancellationToken.None)
-                |> Async.AwaitTask
+            let parentToken =
+                options.cancellationToken |> Option.defaultValue CancellationToken.None
+
+            use timeout = CancellationTokenSource.CreateLinkedTokenSource parentToken
+
+            timeout.CancelAfter(DEFAULT_KEYWORD_METADATA_BATCH_TIMEOUT_MS)
+
+            let! response = client.GetResponseAsync(messages, opts, timeout.Token) |> Async.AwaitTask
 
             return normalizeKeywordBatch batch response.Text
         }
@@ -1287,7 +1302,14 @@ Passages:
 
                         return GeneratedKeywords(generated @ recoveredKeywords)
             with ex ->
-                if isInvalidJsonSchemaError ex then
+                if
+                    (match ex with
+                     | :? OperationCanceledException -> true
+                     | _ -> false)
+                    && (options.cancellationToken |> Option.exists _.IsCancellationRequested)
+                then
+                    return raise ex
+                elif isInvalidJsonSchemaError ex then
                     return RejectedKeywordSchema(ex.Message)
                 elif batch.Length <= 1 then
                     match batch with
@@ -1333,22 +1355,40 @@ Passages:
         generateKeywordBatchRecoverWith generateKeywordBatchPlainJson report client options batch
 
     let private mapAsyncThrottled degree work items =
-        async {
-            use semaphore = new SemaphoreSlim(max 1 degree)
+        items
+        |> AsyncSeq.ofSeq
+        |> AsyncSeq.mapAsyncParallelThrottled (max 1 degree) work
+        |> AsyncSeq.toListAsync
 
-            let run item =
-                async {
-                    do! semaphore.WaitAsync() |> Async.AwaitTask
+    let private generateKeywordBatchesWithProgress
+        report
+        sourceDisplayName
+        stageLabel
+        degree
+        generate
+        (batches: FsColbert.PassageRef list list)
+        =
+        let total = batches.Length
+        let completed = ref 0
 
-                    try
-                        return! work item
-                    finally
-                        semaphore.Release() |> ignore
-                }
+        batches
+        |> List.mapi (fun index batch -> index + 1, batch)
+        |> mapAsyncThrottled degree (fun (batchNo, batch) ->
+            async {
+                let firstIndex = batch |> List.map _.index |> List.min
+                let lastIndex = batch |> List.map _.index |> List.max
 
-            let! results = items |> List.map run |> Async.Parallel
-            return results |> Array.toList
-        }
+                report
+                    $"Keyword metadata {stageLabel} for {sourceDisplayName}: starting chunk batch {batchNo}/{total} (passages {firstIndex}-{lastIndex})."
+
+                let! result = generate batch
+                let finished = Interlocked.Increment completed
+
+                report
+                    $"Keyword metadata {stageLabel} for {sourceDisplayName}: completed {finished}/{total} chunk batch(es)."
+
+                return result
+            })
 
     let private keywordMetadataFingerprint (options: KeywordGenerationOptions) (passages: FsColbert.PassageRef list) =
         let metadata =
@@ -1431,7 +1471,10 @@ Passages:
                                 |> List.chunkBySize options.batchSize
 
                             let! generated =
-                                mapAsyncThrottled
+                                generateKeywordBatchesWithProgress
+                                    report
+                                    source.DisplayName
+                                    "structured generation"
                                     options.parallelism
                                     (generateKeywordBatchRecover report client options)
                                     batches
@@ -1452,7 +1495,10 @@ Passages:
                                             "OpenAI rejected the structured keyword schema; retrying keyword generation in JSON mode."
 
                                         return!
-                                            mapAsyncThrottled
+                                            generateKeywordBatchesWithProgress
+                                                report
+                                                source.DisplayName
+                                                "JSON-mode fallback"
                                                 options.parallelism
                                                 (generateKeywordBatchJsonModeRecover report client options)
                                                 rejectedBatches
@@ -1474,7 +1520,10 @@ Passages:
                                             "OpenAI rejected keyword JSON mode; retrying keyword generation without response formatting."
 
                                         return!
-                                            mapAsyncThrottled
+                                            generateKeywordBatchesWithProgress
+                                                report
+                                                source.DisplayName
+                                                "plain-JSON fallback"
                                                 options.parallelism
                                                 (generateKeywordBatchPlainJsonRecover report client options)
                                                 rejectedFallbackBatches

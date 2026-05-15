@@ -15,5 +15,6 @@ module Icons =
     let remove = "\ue15b"
     let clear = "\ue872"
     let delete = "\ue872"
+    let deleteForever = "\ue92b"
     let signalDisconnected = "\uf239"
     let signalConnected = "\uf0eb"

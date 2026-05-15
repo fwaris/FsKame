@@ -26,12 +26,13 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="FSharp.Control.AsyncSeq" />
     <PackageReference Include="FSharp.SystemTextJson" />
     <PackageReference Include="FsColbert" />
     <PackageReference Include="Microsoft.Extensions.AI" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" PrivateAssets="all" />
     <PackageReference Include="PDFtoImage" PrivateAssets="all" />
-    <PackageReference Include="RapidOCR.Net" />
+    <PackageReference Include="RapidOCR.Net" PrivateAssets="all" />
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 

@@ -102,6 +102,9 @@ module PdfLibrary =
             (pdfParsingMode useHybridPdfParsing)
             source
 
+    let private throwIfKeywordCancellationRequested (options: FsKame.QA.KnowledgeSources.KeywordGenerationOptions) =
+        options.cancellationToken |> Option.iter _.ThrowIfCancellationRequested()
+
     let private hasExisting (docs: PdfDocumentSource list) originalPath fileName =
         docs
         |> List.exists (fun doc ->
@@ -425,10 +428,19 @@ module PdfLibrary =
 
     let processDocument report keywordOptions useHybridPdfParsing (doc: PdfDocumentSource) =
         async {
+            let parserName = if useHybridPdfParsing then "Hybrid" else "Legacy"
+
+            report $"Reading {doc.displayName} with {parserName} parser."
+
+            throwIfKeywordCancellationRequested keywordOptions
+
             let! result = readPassages report useHybridPdfParsing doc
 
             match result with
             | Ok passages ->
+                report $"Read {passages.Length} passage(s) from {doc.displayName}; indexing content."
+                throwIfKeywordCancellationRequested keywordOptions
+
                 let source: FsKame.QA.KnowledgeSource =
                     { FsKame.QA.KnowledgeSource.kind = qaSourceKind doc.kind
                       location = doc.storedPath
@@ -444,28 +456,38 @@ module PdfLibrary =
                         passages
                 with
                 | Ok() ->
+                    report $"Indexed {doc.displayName} with {passages.Length} passage(s)."
+
                     return
                         { id = doc.id
                           chunkCount = passages.Length
                           error = None }
                 | Error err ->
+                    report $"Indexing {doc.displayName} failed: {err}"
+
                     return
                         { id = doc.id
                           chunkCount = 0
                           error = Some err }
             | Error err ->
+                report $"Reading {doc.displayName} failed: {err}"
+
                 return
                     { id = doc.id
                       chunkCount = 0
                       error = Some err }
         }
 
-    let processDocuments report keywordOptions useHybridPdfParsing docs =
+    let processDocuments report keywordOptions useHybridPdfParsing (docs: PdfDocumentSource list) =
         async {
             let mutable results = []
 
             for doc in docs do
+                throwIfKeywordCancellationRequested keywordOptions
+
+                report $"Processing document {doc.displayName}."
                 let! result = processDocument report keywordOptions useHybridPdfParsing doc
+                report $"Finished processing document {doc.displayName}."
                 results <- result :: results
 
             return List.rev results
